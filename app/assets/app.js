@@ -130,18 +130,41 @@
   var rawVer = 0;
   var rawAggMem = {};
 
+  function rawGateway() { return String((typeof CFG !== 'undefined' && CFG && CFG.newapiBase) || ''); }
+
   function rawLoad() {
     if (rawStore) return rawStore;
     try {
       var s0 = localStorage.getItem(RAW_KEY);
       if (s0) {
         var o = JSON.parse(s0);
-        if (o && o.rows && o.rows.length) { rawStore = o; return rawStore; }
+        if (o && o.rows && o.rows.length) {
+          if (o.tgt == null) { o.tgt = rawGateway(); rawStore = o; return rawStore; }   // 老仓没有网关标记：认领
+          if (o.tgt === rawGateway()) { rawStore = o; return rawStore; }
+          // 网关换了：仓里全是另一个实例的日志（令牌名/统计全错），而 rawCovered()
+          // 只看 coverFrom → 会把旧仓当成新网关「已覆盖」直接零请求返回。整仓作废，
+          // 连同旧网关的 HTTP 缓存一起清：否则同窗口的缓存响应（例如启动期那次空的
+          // /api/log/）会直接命中，扫出 0 行还被标成「已覆盖」
+          try { localStorage.removeItem(RAW_KEY); } catch (e0) { }
+          rawAggMem = {};
+          cacheClearAll();
+        }
       }
     } catch (e) { }
     try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e2) { }   // v2 缓存一次性清掉
-    rawStore = { at: 0, since: 0, newest: 0, pages: 0, complete: false, rows: [] };
+    rawStore = { at: 0, since: 0, newest: 0, pages: 0, complete: false, tgt: rawGateway(), rows: [] };
     return rawStore;
+  }
+
+  /** 换网关时整仓作废：只清 cache 不够，RAW_KEY 里的历史行会继续冒充新网关的数据 */
+  function rawReset() {
+    rawStore = null;
+    rawAggMem = {};
+    rawVer++;
+    try { localStorage.removeItem(RAW_KEY); } catch (e) { }
+    try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e1) { }
+    cacheClearAll();
+    rawLoad();
   }
 
   var rawSaveTimer = null;
@@ -1994,11 +2017,13 @@
       b.onclick = function () {
         var p = PRESETS[b.getAttribute('data-preset')];
         if (!p) return;
+        var gw0 = CFG.newapiBase;
         collect();
         CFG.newapiBase = p.newapiBase;
         CFG.hubBase = p.hubBase;
         CFG.channel = 'auto';
         saveCfg();
+        if (gw0 !== CFG.newapiBase) rawReset();   // 换了网关：日志仓整仓作废，不能让旧行冒充新网关
         S.hubToken = '';
         S.tokens = null; S.over = null; S.usage = null; S.wb = null;
         renderSettings();
@@ -2008,6 +2033,7 @@
     });
 
     function saveAndGo() {
+      var gw0 = CFG.newapiBase;
       collect();
       if (!CFG.newapiBase) {
         toast('请先填 NewAPI 地址（如 http://你的网关地址:3000）', 'err');
@@ -2038,6 +2064,7 @@
       }
       S.hubToken = '';
       cacheClearAll();
+      if (gw0 !== CFG.newapiBase) rawReset();   // 换了网关：日志仓整仓作废，不能让旧行冒充新网关
       refreshAll();
       startAutoRefresh();
       setTimeout(function () { showTab('overview'); }, 400);
@@ -2093,6 +2120,7 @@
       confirmSheet('清除配置', '将删除本机保存的地址、令牌、面板密码，并清掉 WebView 缓存。', function () {
         try { localStorage.removeItem(LS_KEY); } catch (e) { }
         cacheClearAll();
+        rawReset();
         try {
           if (window.NativeBridge && window.NativeBridge.clearWebData) window.NativeBridge.clearWebData();
         } catch (e) { }
