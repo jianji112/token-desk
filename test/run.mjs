@@ -14,13 +14,14 @@
  *   node test/run.mjs                # 跑全部用例，打印结果
  *   node test/run.mjs --only=F2,F3   # 只跑指定用例
  *   node test/run.mjs --json         # 额外输出机器可读 JSON
+ *   # 互斥锁：已有实例在跑时，后启动的直接退出（exit 3），防止并发跑污染时序敏感用例
  *
  * 依赖：node >= 20（用内置 WebSocket）、本机 google-chrome。无 npm 依赖。
  */
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, openSync, closeSync, writeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,6 +43,33 @@ const EMIT_JSON = argv.includes('--json');
 const OUT = (argv.find((a) => a.startsWith('--out=')) || '').slice(6).replace(/\.(txt|json)$/, '');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ─────────────────────────────────────────── 进程级互斥锁
+/** F13/F4b 对时序敏感，并发 Chrome 会互抢 CPU 造成 flake，全量/--only 跑都必须串行。
+ *  实现：'wx' 独占创建 lockfile（原子操作）并写入 pid；抢不到锁先探活——
+ *  持有者活着 → exit 3 报错；是上一轮崩溃遗留的 stale lock → 清掉重试一次。
+ *  释放：进程 exit 时删锁；被 SIGKILL 时靠 pid 探活兜底（下一轮自动清 stale）。 */
+function acquireLock() {
+  mkdirSync(SCRATCH, { recursive: true }); // SCRATCH 可能不存在（锁的获取早于 launchChrome 建目录）
+  const lockPath = path.join(SCRATCH, 'td-harness.lock');
+  const create = () => { const fd = openSync(lockPath, 'wx'); writeSync(fd, String(process.pid)); closeSync(fd); };
+  try {
+    create();
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let pid = 0;
+    try { pid = Number(readFileSync(lockPath, 'utf8').trim()) || 0; } catch (e2) {}
+    let alive = false;
+    if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch (e3) { alive = e3.code === 'EPERM'; } }
+    if (alive) {
+      console.error(`[harness] 互斥锁被占用（${lockPath}，pid ${pid} 仍在运行）。时序敏感用例禁止并发跑，本次退出。`);
+      process.exit(3);
+    }
+    try { rmSync(lockPath, { force: true }); } catch (e4) {}
+    create();
+  }
+  process.on('exit', () => { try { rmSync(lockPath, { force: true }); } catch (e) {} });
+}
 
 // ─────────────────────────────────────────── mock 服务
 const state = {
@@ -718,6 +746,7 @@ const blocked = [
 
 // ─────────────────────────────────────────── 主流程
 async function main() {
+  acquireLock(); // 先拿锁再起服务/Chrome：抢不到锁直接 exit 3，绝不让两个 harness 并发跑
   await new Promise((res) => server.listen(0, '127.0.0.1', res));
   const port = server.address().port;
   const { proc, port: cdpPort } = await launchChrome();
