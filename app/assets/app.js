@@ -2553,7 +2553,13 @@
     lastScan: function () { return rawLoad().scan || null; },
     rawAgg: rawAggFor, rawClear: function () { try { localStorage.removeItem(RAW_KEY); } catch (e) {} rawStore = null; rawAggMem = {}; rawVer++; },
     backfillTiming: backfillTiming, speedText: speedText,
-    reqlog: function () { return (S.reqlog || []).length; }
+    reqlog: function () { return (S.reqlog || []).length; },
+    /* ── 测试钩子（P0-0 harness 用，无副作用，不参与业务逻辑）── */
+    cacheSize: function () { return Object.keys(cacheMem).length; },
+    cacheClear: function () { cacheMem = {}; try { for (var i = localStorage.length - 1; i >= 0; i--) { var k = localStorage.key(i); if (k && k.indexOf(CACHE_PREFIX) === 0) localStorage.removeItem(k); } } catch (e) { } },
+    __setNow: function (sec) { var t = sec * 1000; Date.now = function () { return t; }; },
+    __http: http,
+    __pending: function () { return Object.keys(pending).length; }
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

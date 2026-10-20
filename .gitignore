@@ -25,3 +25,6 @@ __pycache__/
 .vscode/
 .DS_Store
 *.swp
+
+# 测试运行时产物（harness 的 chrome profile 已改到缓存目录，这里只兜底旧目录）
+test/.run/
