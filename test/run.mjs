@@ -14,14 +14,14 @@
  *   node test/run.mjs                # 跑全部用例，打印结果
  *   node test/run.mjs --only=F2,F3   # 只跑指定用例
  *   node test/run.mjs --json         # 额外输出机器可读 JSON
- *   # 互斥锁：已有实例在跑时，后启动的直接退出（exit 3），防止并发跑污染时序敏感用例
+ *   # 互斥锁：已有实例在跑时，后启动的直接退出（exit 2），防止并发跑污染时序敏感用例
  *
  * 依赖：node >= 20（用内置 WebSocket）、本机 google-chrome。无 npm 依赖。
  */
 
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, openSync, closeSync, writeSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, openSync, closeSync, writeSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,29 +46,57 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─────────────────────────────────────────── 进程级互斥锁
 /** F13/F4b 对时序敏感，并发 Chrome 会互抢 CPU 造成 flake，全量/--only 跑都必须串行。
- *  实现：'wx' 独占创建 lockfile（原子操作）并写入 pid；抢不到锁先探活——
- *  持有者活着 → exit 3 报错；是上一轮崩溃遗留的 stale lock → 清掉重试一次。
- *  释放：进程 exit 时删锁；被 SIGKILL 时靠 pid 探活兜底（下一轮自动清 stale）。 */
+ *  锁文件固定 test/.run/run.lock（已被 .gitignore 忽略）——不放仓库根、不放缓存目录：
+ *  放缓存目录会让独立副本的 A/B 串行实验互相顶死，CI 上也会写到 runner 家目录。
+ *  实现：'wx' 独占创建（原子）并写入 pid；抢不到锁先判失效——
+ *    持有进程活着且锁龄 < 30min → stderr 报占用并 exit 2；
+ *    pid 已死，或锁龄 > 30min（pid 复用会把死进程误判成活）→ 接管并警告。
+ *  释放：正常退出 / 异常 / SIGINT / SIGTERM 都要 unlink（只挂 'exit' 覆盖不到信号默认终止路径）。 */
+const LOCK_DIR = path.join(HERE, '.run');
+const LOCK_PATH = path.join(LOCK_DIR, 'run.lock');
+const LOCK_STALE_MS = 30 * 60 * 1000;
+let lockReleased = false;
+
+function createLock() {
+  const fd = openSync(LOCK_PATH, 'wx'); // 原子：文件已存在 → EEXIST
+  writeSync(fd, String(process.pid));
+  closeSync(fd);
+}
+
+function pidAlive(pid) {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+function releaseLock() {
+  if (lockReleased) return;
+  lockReleased = true;
+  try { rmSync(LOCK_PATH, { force: true }); } catch (e) {}
+}
+
 function acquireLock() {
-  mkdirSync(SCRATCH, { recursive: true }); // SCRATCH 可能不存在（锁的获取早于 launchChrome 建目录）
-  const lockPath = path.join(SCRATCH, 'td-harness.lock');
-  const create = () => { const fd = openSync(lockPath, 'wx'); writeSync(fd, String(process.pid)); closeSync(fd); };
+  mkdirSync(LOCK_DIR, { recursive: true }); // 取锁早于任何建目录动作，不建会 openSync ENOENT
   try {
-    create();
+    createLock();
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
-    let pid = 0;
-    try { pid = Number(readFileSync(lockPath, 'utf8').trim()) || 0; } catch (e2) {}
-    let alive = false;
-    if (pid > 0) { try { process.kill(pid, 0); alive = true; } catch (e3) { alive = e3.code === 'EPERM'; } }
-    if (alive) {
-      console.error(`[harness] 互斥锁被占用（${lockPath}，pid ${pid} 仍在运行）。时序敏感用例禁止并发跑，本次退出。`);
-      process.exit(3);
+    let raw = '';
+    try { raw = readFileSync(LOCK_PATH, 'utf8').trim(); } catch (e2) {}
+    let ageMs = Infinity;
+    try { ageMs = Date.now() - statSync(LOCK_PATH).mtimeMs; } catch (e2) {}
+    const pid = Number(raw) || 0;
+    if (pidAlive(pid) && ageMs < LOCK_STALE_MS) {
+      console.error(`[harness] 另一轮 harness 正在跑（pid=${pid}），本次退出（exit 2）。时序敏感用例禁止并发。`);
+      process.exit(2);
     }
-    try { rmSync(lockPath, { force: true }); } catch (e4) {}
-    create();
+    console.error(`[harness] 接管失效锁 ${LOCK_PATH}：pid=${pid} 锁龄 ${Math.round(ageMs / 1000)}s（持有进程已退出或锁超 30min）`);
+    try { rmSync(LOCK_PATH, { force: true }); } catch (e3) {}
+    createLock();
   }
-  process.on('exit', () => { try { rmSync(lockPath, { force: true }); } catch (e) {} });
+  process.on('exit', releaseLock);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { releaseLock(); process.exit(sig === 'SIGINT' ? 130 : 143); });
+  }
 }
 
 // ─────────────────────────────────────────── mock 服务
@@ -746,7 +774,7 @@ const blocked = [
 
 // ─────────────────────────────────────────── 主流程
 async function main() {
-  acquireLock(); // 先拿锁再起服务/Chrome：抢不到锁直接 exit 3，绝不让两个 harness 并发跑
+  acquireLock(); // 先拿锁再起服务/Chrome：抢不到锁直接 exit 2，绝不让两个 harness 并发跑
   await new Promise((res) => server.listen(0, '127.0.0.1', res));
   const port = server.address().port;
   const { proc, port: cdpPort } = await launchChrome();
