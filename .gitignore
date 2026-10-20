@@ -1,0 +1,27 @@
+# 构建产物
+build/
+dist/
+*.apk
+*.idsig
+*.zip
+
+# 签名材料（绝不入库：泄露密钥可让任何人冒充升级你的 App）
+.signing/
+keystore/
+*.jks
+*.keystore
+*.p12
+
+# 本机私有配置（签名口令、预设地址、测试凭证）
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+*.swp

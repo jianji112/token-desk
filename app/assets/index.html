@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#0b0f14" />
+<title>令牌台</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header id="hd">
+    <div class="hd-l">
+      <div class="brand">令牌台</div>
+      <div class="sub" id="hdsub">正在启动…</div>
+    </div>
+    <div class="hd-r">
+      <button class="iconbtn eye" id="btn-eye" aria-label="隐藏名称" title="隐藏令牌名 / 账号名">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico-eye">
+          <path d="M1.8 12S5.6 5.5 12 5.5 22.2 12 22.2 12 18.4 18.5 12 18.5 1.8 12 1.8 12z"/>
+          <circle cx="12" cy="12" r="3.1"/>
+        </svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico-eye-off">
+          <path d="M1.8 12S5.6 5.5 12 5.5 22.2 12 22.2 12 18.4 18.5 12 18.5 1.8 12 1.8 12z"/>
+          <circle cx="12" cy="12" r="3.1"/>
+          <path d="M4 20 20 4"/>
+        </svg>
+      </button>
+      <button class="iconbtn" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+
+  <main id="views">
+    <section class="view" data-view="overview"></section>
+    <section class="view" data-view="tokens"></section>
+    <section class="view" data-view="usage"></section>
+    <section class="view" data-view="wb"></section>
+    <section class="view" data-view="settings"></section>
+  </main>
+
+  <nav id="tabs">
+    <button data-tab="overview" class="on">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z"/></svg>
+      <span>概览</span>
+    </button>
+    <button data-tab="tokens">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M17 12v3M20 12v2"/></svg>
+      <span>令牌</span>
+    </button>
+    <button data-tab="usage">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+      <span>用量</span>
+    </button>
+    <button data-tab="wb">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4M9 13h.01M15 13h.01M9 16h6"/></svg>
+      <span>模型</span>
+    </button>
+    <button data-tab="settings">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M4.2 7.5l1.7 1M18.1 15.5l1.7 1M4.2 16.5l1.7-1M18.1 8.5l1.7-1"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+</div>
+
+<div id="sheet" class="hidden"></div>
+<div id="toast" class="hidden"></div>
+
+<script src="bootstrap.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
