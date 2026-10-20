@@ -880,6 +880,47 @@ const fixtures = [
   },
 
   {
+    id: 'F16',
+    name: 'secureAvailable()=true 但首次 secureSet 被拒 → 必须回退明文并标红',
+    cfg: (port) => baseCfg(port),
+    // 桩：KeyStore 能 load（available=true），但 secureSet 每次都返 false（真机生成密钥失败的最坏形态）。
+    // 规格要求「available=true 之后仍须检查首次 secureSet 返回值」—— 只信 available 就会把令牌
+    // 当成已加密、实际什么都没存，重启后配置凭空丢失，且用户看不到任何提示。
+    preSeed: `window.NativeBridge = {
+      secureAvailable: function () { return true; },
+      secureSet: function () { window.__ss = (window.__ss || 0) + 1; return false; },
+      secureGet: function () { return null; },
+      secureClear: function () { window.__sc = (window.__sc || 0) + 1; }
+    }; window.__ss = 0; window.__sc = 0;`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      // 注意：boot() 里就调过一次 saveCfg()，所以进到用例时 bridge 已经被试过一次、dead 已置位。
+      // 这里测的是「被拒之后」的契约：回退明文 + 标红 + 不再挨个键重试。
+      var st0 = __app.secureState();
+      var ss0 = window.__ss || 0;
+      __app.cfg().newapiToken = 'plain-fallback-token';
+      __app.cfg().hubBase = 'http://127.0.0.1:9/hub';
+      __app.saveCfg();
+      var st = __app.secureState();
+      var o = {};
+      try { o = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      return { avail: st0.available, dead: st.dead, err: st.err, ss: window.__ss || 0, ss0: ss0,
+               plainTok: o.newapiToken || null, plainHub: o.hubBase || null };
+    })()`,
+    check(out) {
+      return [
+        eq('桩必须让 secureAvailable() 为 true（否则测的不是这条路径）', out.avail, true),
+        eq('secureSet 被拒后必须置 dead（此后一律回退明文）', out.dead, true),
+        eq('必须把失败原因留给设置页标红（不得静默回退）', typeof out.err === 'string' && out.err.length > 0, true),
+        eq('回退后令牌必须落明文（配置不许丢）', out.plainTok, 'plain-fallback-token'),
+        eq('回退后其余敏感键也必须落明文', out.plainHub, 'http://127.0.0.1:9/hub'),
+        eq('dead 之后再存配置不得再碰 bridge（不反复重试）', out.ss - out.ss0, 0),
+        eq('整个开机过程 bridge 最多被试一次（4 键不许逐个试）', out.ss <= 1, true),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
