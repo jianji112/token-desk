@@ -38,6 +38,29 @@ public class MainActivity extends Activity {
     final ExecutorService pool = Executors.newFixedThreadPool(4);
     // 在途请求登记表：提交/同 id 去重/取消。不依赖 Android API，可被 JVM 单测直接覆盖
     final HttpJobRegistry jobs = new HttpJobRegistry(pool, this::onHttpResult);
+    // 凭证安全存储：Keystore 主密钥 + SharedPreferences 密文（P0-3 Wave A，纯新增）
+    final SecureStore secure = new SecureStore(this);
+
+    // ---- 凭证安全存储对外接口（Bridge 只做转发，逻辑全在 SecureStore） ----
+    /** Keystore 是否可用；返回 false 时 JS 必须回退 localStorage 并在设置页标红。 */
+    public boolean secureAvailable() {
+        return secure.secureAvailable();
+    }
+
+    /** 加密写入单个凭证键。成功 true；任何异常 false（不抛出、不回传内容）。 */
+    public boolean secureSet(String key, String value) {
+        return secure.secureSet(key, value);
+    }
+
+    /** 解密读取单个凭证键。不存在或解不开返回 null。 */
+    public String secureGet(String key) {
+        return secure.secureGet(key);
+    }
+
+    /** 清空密文并删除主密钥（退出登录 / 迁移完成）。 */
+    public void secureClear() {
+        secure.secureClear();
+    }
 
     /** 原生请求完成回调（pool 线程）→ 回 UI 线程喂给 window.__nativeHttp。 */
     private void onHttpResult(String id, String payload) {
@@ -192,6 +215,28 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public boolean cancel(String id) {
             return host.jobs.cancel(id);
+        }
+
+        // ---- 凭证安全存储（P0-3 Wave A）：JS 侧只认这四个方法 ----
+        // 失败语义定版：可用性 false、写入 false、读取 null、清空无返回，均不抛异常、不回传内容。
+        @JavascriptInterface
+        public boolean secureAvailable() {
+            return host.secureAvailable();
+        }
+
+        @JavascriptInterface
+        public boolean secureSet(String key, String value) {
+            return host.secureSet(key, value);
+        }
+
+        @JavascriptInterface
+        public String secureGet(String key) {
+            return host.secureGet(key);
+        }
+
+        @JavascriptInterface
+        public void secureClear() {
+            host.secureClear();
         }
 
         @JavascriptInterface
