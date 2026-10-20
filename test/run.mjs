@@ -741,7 +741,7 @@ const fixtures = [
 
 /** 明确测不了的：需要改主代码加钩子，或需要 Java/bridge */
 const blocked = [
-  { id: 'F7c-java', name: 'Java 侧超时/cancel（MainActivity.java:214-215 硬编码）', reason: '10s/45s 硬编码与缺失 cancel(id) 只能 Java 单测或真机验，web 侧不可达（F7c-js 已覆盖 JS 侧超时兜底）' },
+  { id: 'F7c-java', name: 'Java 侧超时/cancel/去重（JVM 单测覆盖，web harness 不执行 Java）', reason: '由 test/java/run-java-test.sh 覆盖：HttpJobRegistry.java:66-139（submit 去重/abort/cancel/cancelAll）+ MainActivity.java:40,171-195（jobs 注入、httpOpts 转发、clampTimeout 按参数回落默认值），实测 21 pass / 0 fail；web 侧只覆盖 JS 超时兜底（F7c-js）' },
 ];
 
 // ─────────────────────────────────────────── 主流程
