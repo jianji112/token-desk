@@ -38,6 +38,8 @@ const DAY = 86400;
 const argv = process.argv.slice(2);
 const ONLY = (argv.find((a) => a.startsWith('--only=')) || '').slice(7).split(',').filter(Boolean);
 const EMIT_JSON = argv.includes('--json');
+/** 输出文件名（默认 baseline-before，修完一个补丁用 --out=p0-1-f2 留证据） */
+const OUT = (argv.find((a) => a.startsWith('--out=')) || '').slice(6).replace(/\.(txt|json)$/, '');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -812,11 +814,12 @@ async function main() {
   push('红用例清单：' + (results.filter((r) => !r.ok).map((r) => r.id).join(', ') || '（无）'));
 
   const text = lines.join('\n');
-  const outFile = path.join(HERE, 'baseline-before.txt');
+  const outName = OUT || 'baseline-before';
+  const outFile = path.join(HERE, outName + '.txt');
   writeFileSync(outFile, text + '\n');
   console.log('\n' + text);
   console.log(`\n[written] ${path.relative(process.cwd(), outFile)}`);
-  if (EMIT_JSON) writeFileSync(path.join(HERE, 'baseline-before.json'), JSON.stringify({ NOW, sha, results, blocked }, null, 2));
+  if (EMIT_JSON) writeFileSync(path.join(HERE, outName + '.json'), JSON.stringify({ NOW, sha, results, blocked }, null, 2));
 
   process.exitCode = err ? 2 : 0;
 }

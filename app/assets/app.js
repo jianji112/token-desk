@@ -1813,7 +1813,7 @@
     html += '<div class="card"><div class="card-h"><div class="card-t">NewAPI 网关</div></div>' +
       '<div class="field"><label>① 地址 <span style="color:#fca5a5">（必填，网关网址不是密钥）</span></label><input id="f-nabase" type="url" value="' + esc(CFG.newapiBase) + '" placeholder="http://你的网关地址:3000"></div>' +
       '<div class="field"><label>② 管理令牌 <span style="color:#fca5a5">（必填，32 位字母数字，不是网址）</span>' +
-      ' <a href="javascript:void(0)" id="f-tokhelp" style="margin-left:6px">怎么拿？</a></label>' +
+      ' <a href="#" id="f-tokhelp" style="margin-left:6px">怎么拿？</a></label>' +
       '<input id="f-natok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(CFG.newapiToken) + '" placeholder="个人设置 → 安全设置 → 系统访问令牌"></div>' +
       '<div class="field"><label>③ 用户 ID（数字）</label><input id="f-nauid" type="number" inputmode="numeric" value="' + esc(CFG.newapiUid) + '">' +
       '<div class="hint">New-API 里 Root 用户通常是 1。</div></div>' +
@@ -1927,7 +1927,8 @@
     };
 
     var helpBtn = $('#f-tokhelp');
-    if (helpBtn) helpBtn.onclick = function () {
+    if (helpBtn) helpBtn.onclick = function (e) {
+      if (e && e.preventDefault) e.preventDefault();   // CSP 下不允许 javascript: URI，用 # + preventDefault 接管
       showSheet('<div class="sheet-body">' +
         '<div class="sheet-title">怎么拿 NewAPI 管理令牌</div>' +
         '<div class="sheet-desc">这个令牌只用来读管理接口（列表/日志），不是对话用的 sk- 密钥。</div>' +
@@ -2287,6 +2288,9 @@
 
   function deltaFetch(st, myRun, maxPages) {
     var cutoff = st.newest || 0;
+    // 服务端按秒截断，同一秒内晚落库的行会被 start_timestamp=cutoff 挡在窗口外，
+    // 所以窗口往前多要 2 秒，再在客户端用 ts < cutoff 精确过滤（同秒行全部收下）
+    var winFrom = cutoff > 2 ? cutoff - 2 : 0;
     var endTs = Math.floor(Date.now() / 1000);
     var acc = [], seen = {}, p = 1, total = null, got = 0, done = false, cap = maxPages || 6, patched = 0;
     var headN = Math.min(300, st.rows.length);
@@ -2295,7 +2299,7 @@
 
     function one(pg) {
       if (pg > cap || done || myRun !== S.usageRun) return Promise.resolve();
-      var u = '/api/log/?p=' + pg + '&page_size=100&type=2&start_timestamp=' + cutoff + '&end_timestamp=' + endTs;
+      var u = '/api/log/?p=' + pg + '&page_size=100&type=2&start_timestamp=' + winFrom + '&end_timestamp=' + endTs;
       return napiRaw(u).then(function (d) {
         if (myRun !== S.usageRun) return;
         var items = (d && d.items) || [];
@@ -2309,7 +2313,7 @@
           var r = logRow(it);
           var k = rokey(r);
           if (seen[k]) { if (fillTiming(idx, r)) patched++; continue; }
-          if (ts <= cutoff) continue;
+          if (ts < cutoff) continue;
           seen[k] = 1;
           acc.push(r);
         }
