@@ -2236,9 +2236,18 @@
 
     var quietCancel = false;
 
+    // 「已经够了」的判定：page 数捷径只在没有重叠时成立。offset 分页期间头部插入
+    // 新行会让后续页重放前面的内容（added < items.length），此时 sc.page 不再代表
+    // 覆盖进度，必须继续翻页直到「新增唯一行数 >= total」或翻到空页。
+    function scEnough() {
+      if (sc.total == null) return false;
+      if (sc.got >= sc.total) return true;
+      return !sc.dirty && sc.page >= Math.ceil(sc.total / 100);
+    }
+
     function batch() {
       if (S.abort || sc.page >= maxPages) return Promise.resolve();
-      if (sc.total != null && (sc.got >= sc.total || sc.page >= Math.ceil(sc.total / 100))) return Promise.resolve();
+      if (scEnough()) return Promise.resolve();
       var pages = [];
       for (var i = 1; i <= 3 && (sc.page + i) <= maxPages; i++) pages.push(sc.page + i);
       return Promise.all(pages.map(function (pg) {
@@ -2251,8 +2260,13 @@
           var d = r.d || {};
           // total 缺失 ≠ 0：NewAPI 少数版本/反代不返回 total，当成 0 会让
           // got>=total 立刻成立 → 只翻 3 页就 rawMarkCovered，把"没扫完"标成"已覆盖"
-          if (sc.total == null && d.total != null && isFinite(Number(d.total))) sc.total = Number(d.total);
+          // total 还会「变大」：翻页期间新请求不断落库，只认首页的 total 会以为够了
+          if (d.total != null && isFinite(Number(d.total))) {
+            var tv = Number(d.total);
+            sc.total = (sc.total == null) ? tv : Math.max(sc.total, tv);
+          }
           var items = d.items || [];
+          var added = 0;
           for (var j = 0; j < items.length; j++) {
             var it = items[j];
             var row = logRow(it);
@@ -2260,8 +2274,12 @@
             if (seen[key]) { fillTiming(idx, row); continue; }
             seen[key] = 1;
             st.rows.push(row);
+            added++;
           }
-          sc.got += items.length;
+          // 只计"新增的唯一行"：offset 分页期间头部插入新行会让 p2 重放 p1 的内容，
+          // 按 items.length 计数会虚高 → 提前 got>=total → 静默少算（实测少 40%）
+          if (added < items.length) sc.dirty = true;   // 本页有条目被去重 → 发生了 offset 重叠
+          sc.got += added;
           sc.page = r.pg;
           if (!items.length) { sc.page = maxPages + 1; break; }
         }
@@ -2273,7 +2291,7 @@
           S.usageLive = la;
           if (S.tab === 'usage') renderUsage();
         }
-        if (sc.total != null && (sc.got >= sc.total || sc.page >= Math.ceil(sc.total / 100))) return;
+        if (scEnough()) return;
         if (sc.page >= maxPages) return;
         if (quiet) return new Promise(function (r2) { setTimeout(r2, 150); }).then(batch);
         return batch();
@@ -2281,7 +2299,7 @@
     }
 
     return batch().then(function () {
-      var full = (sc.total != null && (sc.got >= sc.total || sc.page >= Math.ceil(sc.total / 100)));
+      var full = scEnough();
       if (full) {
         rawMarkCovered(sc.since);
         st.scan = null;
