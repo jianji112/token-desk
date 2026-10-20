@@ -1,0 +1,23 @@
+=== token-desk P0-0 baseline (harness: public/test/run.mjs) ===
+生成时间   : 2026-10-20T17:58:01.561Z
+被测对象   : public/app/assets/app.js  sha256:b9f295ca260b11c8…  2636 行  118712 字节
+时钟       : 冻结 NOW=1761000000 (2025-10-20T22:40:00.000Z)
+浏览器     : google-chrome (headless=new, CDP)
+用例       : 1 条执行 / 1 条 blocked / 总耗时 8.6s
+
+说明：断言写的是"P0-1/P0-2 修好之后"的期望值，所以当前 FAIL = 待修，PASS = 现状即正确（防回归）。
+
+── F7c-js bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending  [PASS]  8571ms
+   ✓ bridge 必须真的被调用（否则测的不是这条路径）
+   ✓ JS 必须自己 reject（不能永久 pending）
+   ✓ 飞行中 pending 必须登记（p0+1）
+   ✓ 超时后 pending 必须回到调用前（不泄漏回调）
+   ✓ 超时时间必须贴合传入的 400ms（不得拖到 45s）
+
+── BLOCKED（本轮测不了，需要主代码加钩子或换 Java 单测）
+   F7c-java Java 侧超时/cancel（MainActivity.java:214-215 硬编码）
+       10s/45s 硬编码与缺失 cancel(id) 只能 Java 单测或真机验，web 侧不可达（F7c-js 已覆盖 JS 侧超时兜底）
+
+SUMMARY: 1 pass / 0 fail / 0 error / 1 blocked
+
+红用例清单：（无）
