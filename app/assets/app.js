@@ -155,6 +155,7 @@
     var st = rawLoad();
     if (!st.rows.length) return false;
     if (st.complete) return true;
+    if (st.capped) return true;   // 已到容量/翻页上限：再扫也扫不出更多，停止重复扫描
     return st.coverFrom != null && st.coverFrom <= sinceSec;
   }
 
@@ -185,7 +186,10 @@
     if (st.rows.length > RAW_CAP) {
       st.rows.length = RAW_CAP;
       var cutTs = st.rows[st.rows.length - 1][0];
-      if (st.coverFrom != null && st.coverFrom < cutTs) st.coverFrom = cutTs;
+      // 截断后我们「只有最近这一段」：coverFrom 必须推进到最老保留行（原来只在
+      // coverFrom 非 null 时才推进，导致 rawCovered 永远算不出来），并打 capped 标记
+      st.capped = true;
+      if (st.coverFrom == null || st.coverFrom < cutTs) st.coverFrom = cutTs;
     }
     if (st.rows[0][0] < st.rows[st.rows.length - 1][0]) {
       st.rows.sort(function (a, b) { return b[0] - a[0]; });
@@ -275,6 +279,7 @@
       absorbParts(agg, r[1] != null ? ('#' + r[1]) : (r[2] || '(未命名令牌)'), r[2], r[3], r[4], r[5], r[6], r[0], r[7], r[8], r[9], r[10]);
     }
     agg.pages = Math.max(1, Math.round(st.rows.length / 100));
+    agg.capped = !!st.capped;
     rawAggMem[range] = { ver: rawVer, agg: agg };
     return agg;
   }
@@ -2302,6 +2307,11 @@
       var full = scEnough();
       if (full) {
         rawMarkCovered(sc.since);
+        st.scan = null;
+      } else if (sc.page >= maxPages) {
+        // 翻到页数上限还没扫完：标 capped 并收尾（原实现把 sc 留在 st.scan 里，
+        // 每次 autoTick 都会重新进来、batch() 首行直接 return，零请求空转到天荒地老）
+        st.capped = true;
         st.scan = null;
       }
       rawMeta();
