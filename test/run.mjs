@@ -849,6 +849,37 @@ const fixtures = [
   },
 
   {
+    id: 'F15',
+    name: '凭证通道（无桥 → 4 键回退明文；首次 rawLoad 时网关必须已就绪）',
+    cfg: (port) => baseCfg(port),
+    // 浏览器里没有 NativeBridge：四条敏感键必须回退 localStorage，否则桌面浏览器上配置会凭空丢；
+    // 同时把 Wave B 的硬要求钉进断言——CFG.newapiBase 必须在任何 rawLoad() 之前就绪，
+    // 否则启动期 rawBase() 拿到 ''，每次冷启动都判网关不等、整仓清空重扫。
+    setup() {
+      state.dynamic = () => ({ items: [], total: 0 });
+    },
+    run: `(async () => {
+      var st = __app.secureState();
+      var fb = __app.rawFirstBase();
+      __app.cfg().newapiBase = 'http://127.0.0.1:9/fake';
+      __app.cfg().newapiToken = 'fallback-token';
+      __app.saveCfg();
+      var o = {};
+      try { o = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      return { avail: st.available, dead: st.dead, keys: st.keys, fb: fb, plainBase: o.newapiBase || null, plainTok: o.newapiToken || null };
+    })()`,
+    check(out, ctx) {
+      return [
+        eq('浏览器无原生桥 → secureAvailable() 必须为 false', out.avail, false),
+        eq('首次 rawLoad 时网关必须已就绪', out.fb, 'http://127.0.0.1:' + ctx.port),
+        eq('无桥时 4 个敏感键必须回退明文（不得静默丢配置）', [out.plainBase, out.plainTok], ['http://127.0.0.1:9/fake', 'fallback-token']),
+        eq('白名单键集合固定 4 个', out.keys, ['newapiBase', 'newapiToken', 'hubBase', 'hubPass']),
+        eq('无桥时不得因回退而标红（回退是正常路径）', out.dead, false),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
