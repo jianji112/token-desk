@@ -130,37 +130,54 @@
   var rawVer = 0;
   var rawAggMem = {};
 
-  function rawGateway() { return String((typeof CFG !== 'undefined' && CFG && CFG.newapiBase) || ''); }
+  // 网关指纹：日志仓必须记住自己属于哪个网关。仓里的令牌名 / 统计 / 覆盖率只对原网关有效，
+  // 而 rawCovered() 只看 coverFrom —— 换网关后旧仓会被当成「已覆盖」直接零请求返回，
+  // 于是统计和令牌名全是旧实例的。规范必须走 normBase()：`http://a` 与 `http://a/` 是同一网关，
+  // 原样字符串比较会把同一网关误判成换网关、白清一次仓。
+  function rawBase() { return normBase(typeof CFG !== 'undefined' && CFG ? CFG.newapiBase : '', ''); }
+
+  /** 丢掉内存仓与聚合缓存，并让在飞的翻页/聚合结果作废（rawVer 是它们的代次标记） */
+  function rawDropMem() {
+    rawStore = null;
+    rawAggMem = {};
+    rawVer++;
+  }
 
   function rawLoad() {
-    if (rawStore) return rawStore;
+    var cur = rawBase();
+    // 内存仓短路前先比网关：预置切换 / 手改地址 / __app 直调都可能绕过显式 rawReset()，
+    // 只靠调用点兜会漏路径。base 变了就丢内存仓，否则旧网关的行会继续冒充新网关数据。
+    if (rawStore) {
+      if (rawStore.base === cur) return rawStore;
+      rawDropMem();
+      cacheClearAll();
+    }
     try {
       var s0 = localStorage.getItem(RAW_KEY);
       if (s0) {
         var o = JSON.parse(s0);
         if (o && o.rows && o.rows.length) {
-          if (o.tgt == null) { o.tgt = rawGateway(); rawStore = o; return rawStore; }   // 老仓没有网关标记：认领
-          if (o.tgt === rawGateway()) { rawStore = o; return rawStore; }
-          // 网关换了：仓里全是另一个实例的日志（令牌名/统计全错），而 rawCovered()
-          // 只看 coverFrom → 会把旧仓当成新网关「已覆盖」直接零请求返回。整仓作废，
-          // 连同旧网关的 HTTP 缓存一起清：否则同窗口的缓存响应（例如启动期那次空的
-          // /api/log/）会直接命中，扫出 0 行还被标成「已覆盖」
+          if (o.base === cur) { rawStore = o; return rawStore; }
+          // 两种都整仓作废：① 网关换了；② 仓里没有 base（升级前写入的 v3 老仓）。
+          // ② 不许「认领」当前网关——认领等于让一个来源不可验证的仓冒充「已覆盖」，
+          // rawCovered() 短路后零请求返回，F8 的旧网关数据会原样复发（代价：升级后清一次缓存）。
+          // 连旧网关的 HTTP 缓存一起清：否则同窗口的缓存响应（例如启动期那次空的 /api/log/）
+          // 会直接命中，扫出 0 行还被标成「已覆盖」
           try { localStorage.removeItem(RAW_KEY); } catch (e0) { }
           rawAggMem = {};
+          rawVer++;
           cacheClearAll();
         }
       }
     } catch (e) { }
     try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e2) { }   // v2 缓存一次性清掉
-    rawStore = { at: 0, since: 0, newest: 0, pages: 0, complete: false, tgt: rawGateway(), rows: [] };
+    rawStore = { at: 0, since: 0, newest: 0, pages: 0, complete: false, base: cur, rows: [] };
     return rawStore;
   }
 
   /** 换网关时整仓作废：只清 cache 不够，RAW_KEY 里的历史行会继续冒充新网关的数据 */
   function rawReset() {
-    rawStore = null;
-    rawAggMem = {};
-    rawVer++;
+    rawDropMem();
     try { localStorage.removeItem(RAW_KEY); } catch (e) { }
     try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e1) { }
     cacheClearAll();
@@ -2685,7 +2702,10 @@
     __setRawCap: function (n) { var v = Math.floor(num(n)); if (v > 0) RAW_CAP = v; return RAW_CAP; },
     __http: http,
     __pending: function () { return Object.keys(pending).length; },
-    rawKey: function () { return RAW_KEY; }
+    rawKey: function () { return RAW_KEY; },
+    // 日志仓所属网关的规范值（只读）：harness 的 seedRaw 要按当前网关打指纹，
+    // 否则「无 base 的老仓一律作废」会把每个 fixture 的 seed 都当成待清仓
+    gatewayBase: function () { return rawBase(); }
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
