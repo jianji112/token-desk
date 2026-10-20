@@ -473,6 +473,13 @@
   var seq = 0;
   var pending = {};
 
+  // 原生通道两段超时（与 Java 侧 HttpJobRegistry.clampTimeout 对齐）。JS 兜底窗口故意早于
+  // Java 侧到期，是为了让「谁结束这次请求」由 JS 掌握：JS 先超时 → 立刻 cancel(id) 断连。
+  // 否则 JS 已 reject、Java 还在跑，用户重试用新 id 时服务器会收到同一个 POST 两次。
+  var NATIVE_CONNECT_MS = 8000;
+  var NATIVE_READ_MS = 15000;
+  var NATIVE_JS_CAP_MS = NATIVE_CONNECT_MS + NATIVE_READ_MS - 1000;
+
   window.__nativeHttp = function (id, payload) {
     var p = pending[id];
     if (!p) return;
@@ -527,20 +534,33 @@
     return new Promise(function (resolve, reject) {
       var id = 'r' + (++seq);
       var settled = false;
+      var waitMs = Math.min(num(timeout) > 0 ? num(timeout) : 45000, NATIVE_JS_CAP_MS);
       pending[id] = {
         resolve: function (v) { settled = true; resolve(v); },
         reject: function (e) { settled = true; reject(e); }
       };
       setTimeout(function () {
         if (!settled && pending[id]) {
+          // 顺序不能换：先通知 Java 停（断连），再清本地登记，最后 reject。
+          // 少这一步就是「同一 POST 发两次」的根因。
+          try {
+            if (window.NativeBridge && typeof window.NativeBridge.cancel === 'function') window.NativeBridge.cancel(id);
+          } catch (e) { }
           delete pending[id];
-          reject(new Error('请求超时（' + Math.round(timeout / 1000) + 's）：' + url));
+          reject(new Error('请求超时（' + Math.round(waitMs / 1000) + 's）：' + url));
         }
-      }, timeout);
+      }, waitMs);
 
-      if (window.NativeBridge && window.NativeBridge.http) {
+      var bridge = window.NativeBridge;
+      if (bridge && (typeof bridge.httpOpts === 'function' || typeof bridge.http === 'function')) {
         try {
-          window.NativeBridge.http(id, method, url, JSON.stringify(headers || {}), body || '');
+          var hj = JSON.stringify(headers || {});
+          var bd = body || '';
+          if (typeof bridge.httpOpts === 'function') {
+            bridge.httpOpts(id, method, url, hj, bd, JSON.stringify({ connectMs: NATIVE_CONNECT_MS, readMs: NATIVE_READ_MS }));
+          } else {
+            bridge.http(id, method, url, hj, bd);
+          }
         } catch (e) {
           delete pending[id];
           if (!settled) reject(new Error('原生请求失败：' + e.message));
