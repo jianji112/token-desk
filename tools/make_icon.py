@@ -1,4 +1,4 @@
-"""生成令牌台 Launcher 图标（各密度 mipmap PNG）。一次性工具，产物随工程提交。"""
+"""生成TokenDesk Launcher 图标（各密度 mipmap PNG）。一次性工具，产物随工程提交。"""
 import os
 from PIL import Image, ImageDraw
 

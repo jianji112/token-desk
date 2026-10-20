@@ -1,4 +1,4 @@
-"""令牌台 Web 层自测：用 headless Chrome + CDP 真实访问局域网接口，逐页签抓文本。
+"""TokenDesk Web 层自测：用 headless Chrome + CDP 真实访问局域网接口，逐页签抓文本。
 
 用法：python3 tools/webtest.py            # 自动从项目根 .env / 环境变量取凭证写测试用 bootstrap
 产物：$TMPDIR/tokendesk-test/{dom-*.txt,screen-*.png}（默认系统临时目录）

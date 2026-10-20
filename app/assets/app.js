@@ -283,6 +283,7 @@
     usage: null,
     usageLive: null,
     wb: null,
+    rate: null,
     busy: {},
     errors: {},
     hubToken: '',
@@ -328,6 +329,44 @@
 
   function num(n) { n = Number(n); return isFinite(n) ? n : 0; }
   function fmtInt(n) { return Math.round(num(n)).toLocaleString('en-US'); }
+
+  function parseRate(st) {
+    if (!st) return null;
+    var unit = num(st.quota_per_unit) > 0 ? num(st.quota_per_unit) : 500000;
+    var kind = String(st.quota_display_type || '').toUpperCase();
+    var fx = num(st.usd_exchange_rate) || num(st.price) || 1;
+    if (kind === 'CNY') return { unit: unit, cny: fx > 0 ? fx : 1, sym: '¥', kind: 'CNY' };
+    if (kind === 'CUSTOM') {
+      var cr = num(st.custom_currency_exchange_rate);
+      return { unit: unit, cny: cr > 0 ? cr : 1, sym: String(st.custom_currency_symbol || '') || '¤', kind: 'CUSTOM' };
+    }
+    if (kind === 'USD') return { unit: unit, cny: 1, sym: '$', kind: 'USD' };
+    return { unit: unit, cny: fx > 0 ? fx : 1, sym: '¥', kind: 'CNY' };
+  }
+
+  function rateInfo() {
+    var r = S.rate || {};
+    var unit = num(r.unit) > 0 ? num(r.unit) : 500000;
+    var cny = num(r.cny) > 0 ? num(r.cny) : 1;
+    return { unit: unit, cny: cny, sym: r.sym || (S.rate ? '¥' : '$') };
+  }
+
+  function cnyNum(q) {
+    var r = rateInfo();
+    return num(q) / r.unit * r.cny;
+  }
+
+  function cnyOf(q) {
+    var r = rateInfo();
+    var v = cnyNum(q);
+    if (!isFinite(v)) return r.sym + '—';
+    if (v === 0) return r.sym + '0';
+    var a = Math.abs(v);
+    if (a >= 1000) return r.sym + fmtInt(v);
+    if (a >= 1) return r.sym + v.toFixed(2);
+    if (a >= 0.01) return r.sym + v.toFixed(3);
+    return r.sym + v.toFixed(4);
+  }
 
   function fmtTok(n) {
     n = Math.round(num(n));
@@ -674,10 +713,12 @@
     setSub('读取 NewAPI 账户…');
     return Promise.all([
       napiRaw('/api/user/self', 'GET', undefined, !!force),
-      loadAllTokens(!!force)
+      loadAllTokens(!!force),
+      napiRaw('/api/status', 'GET', undefined, !!force).catch(function () { return null; })
     ]).then(function (res) {
       S.over = { user: res[0] || {}, at: Date.now(), tokenTotal: res[1].total, tokenTruncated: res[1].truncated };
       S.tokens = normTokens(res[1]);
+      S.rate = parseRate(res[2]);
       delete S.errors.overview;
       setSub('已更新 ' + hhmmss());
     }).catch(function (e) {
@@ -961,6 +1002,18 @@
     return Math.min(95, 8 + Math.min(80, agg.pages * 5));
   }
 
+  function tokUsedSum() {
+    var s = 0;
+    if (S.tokens) for (var i = 0; i < S.tokens.length; i++) s += num(S.tokens[i].used);
+    return s;
+  }
+
+  function cumQuota(used, w) {
+    var u = num(used);
+    var win = w ? num(w.quota) : 0;
+    return Math.max(u, win);
+  }
+
   function renderTokens() {
     var el = viewEl('tokens');
     var html = '';
@@ -983,6 +1036,8 @@
       (S.over && S.over.tokenTruncated ? ' <span class="pill warn">仅显示前 ' + S.tokens.length + '</span>' : '') + '</span></div>' +
       '<div class="kv"><span class="k">窗口请求</span><span class="v mono">' + (usage ? fmtInt(usage.req) : '—') + '</span></div>' +
       '<div class="kv"><span class="k">窗口 Token</span><span class="v mono">' + (usage ? fmtTok(usage.total) : '—') + '</span></div>' +
+      '<div class="kv"><span class="k">本期消耗</span><span class="v mono cny">' + (usage ? cnyOf(usage.quota) : '—') + '</span></div>' +
+      '<div class="kv"><span class="k">累计消耗</span><span class="v mono">' + (S.tokens ? cnyOf(usage ? Math.max(tokUsedSum(), num(usage.quota)) : tokUsedSum()) : '—') + '</span></div>' +
       '</div>';
 
     if (!S.tokens) {
@@ -1019,10 +1074,11 @@
         '<div class="tok-grid">' +
         '<div><span class="k">本期 Token</span><b class="mono">' + (!usage ? '统计中…' : fmtTok(w ? w.tokens : 0)) + '</b></div>' +
         '<div><span class="k">本期请求</span><b class="mono">' + (!usage ? '—' : (w ? fmtInt(w.req) : '0')) + '</b></div>' +
-        '<div><span class="k">剩余额度</span><b class="mono">' + (t.unlimited ? '无限' : fmtQty(t.remain)) + '</b></div>' +
-        '<div><span class="k">累计消耗</span><b class="mono">' + fmtQty(t.used) + '</b></div>' +
+        '<div><span class="k">本期消耗</span><b class="mono cny">' + (!usage ? '统计中…' : cnyOf(w ? w.quota : 0)) + '</b></div>' +
+        '<div><span class="k">累计消耗</span><b class="mono">' + cnyOf(cumQuota(t.used, w)) + '</b></div>' +
         '</div>' +
         '<div class="tok-sub">' +
+        '<span><i>剩余额度</i>' + (t.unlimited ? '无限' : fmtQty(t.remain)) + '</span>' +
         '<span><i>有效期</i>' + esc(expiry) + '</span>' +
         '<span><i>最后使用</i>' + ago(t.accessed) + '</span>' +
         (t.models.length ? '<span><i>模型</i>限定 ' + t.models.length + ' 个</span>' : '<span><i>模型</i>不限</span>') +
