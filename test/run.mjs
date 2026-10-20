@@ -99,6 +99,32 @@ function acquireLock() {
   }
 }
 
+/** 跨副本预检：锁是仓内路径，两份独立副本各锁各的、互不互斥，但 Chrome 仍会抢 CPU
+ *  把 F13/F4b 这类时序用例拖成 flake。取锁之后再扫一遍 /proc 找同类 harness。
+ *  判据只能用 argv：argv[0] basename 是 node/nodejs，且某个参数以 test/run.mjs 结尾。
+ *  不能用 `pgrep -af 'node .*test/run.mjs'`——调用方的 shell wrapper 命令行里就含这串字，
+ *  会把自己命中也算进来（实测把 pid 461198 的 bash 判成 harness）。 */
+function findOtherHarness() {
+  let names;
+  try { names = readdirSync('/proc'); } catch (e) { return 0; }  // 非 Linux 直接跳过，不拦路
+  const self = process.pid, parent = process.ppid;
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    if (pid === self || pid === parent) continue;   // 排除自己与调用方 shell
+    let raw = '';
+    try { raw = readFileSync(`/proc/${name}/cmdline`, 'utf8'); } catch (e) { continue; }  // 权限/已退出
+    if (!raw) continue;
+    const av = raw.split('\0').filter(Boolean);
+    if (av.length < 2) continue;
+    const exe = path.basename(av[0]);
+    if (exe !== 'node' && exe !== 'nodejs') continue;
+    if (!av.slice(1).some((a) => a.endsWith('test/run.mjs'))) continue;
+    return pid;
+  }
+  return 0;
+}
+
 // ─────────────────────────────────────────── mock 服务
 const state = {
   gate: true, // true = /api/log/ 一律返回空（用于让 boot 阶段安静），fixture 开始前打开
@@ -860,6 +886,12 @@ const blocked = [
 // ─────────────────────────────────────────── 主流程
 async function main() {
   acquireLock(); // 先拿锁再起服务/Chrome：抢不到锁直接 exit 2，绝不让两个 harness 并发跑
+  // 锁管同仓；跨副本（csp-test/、审查副本）靠 /proc 扫 argv，同样 exit 2 走人
+  const other = findOtherHarness();
+  if (other) {
+    console.error(`[harness] 另一轮 harness 正在跑（pid=${other}），本次退出（exit 2）。时序敏感用例禁止并发。`);
+    process.exit(2);
+  }
   await new Promise((res) => server.listen(0, '127.0.0.1', res));
   const port = server.address().port;
   const { proc, port: cdpPort } = await launchChrome();
