@@ -759,6 +759,40 @@ const fixtures = [
     },
   },
 
+  {
+    id: 'F13b',
+    name: '并发双 delta（两轮同时在飞必须共享，usageRun 只 +1、行不得重复拼接）',
+    cfg: (port) => baseCfg(port),
+    // F13 的 du==1 是改前改后都成立的守门断言（该 fixture 只发一轮 delta）；
+    // 真正让「共享同一轮」可证伪的是本用例：两轮同时发起，若 deltaP 复用被去掉，
+    // usageRun 会 +2、p=1 会被请求两次、两次 acc.concat(st.rows) 会把同一行拼两遍。
+    seed: `__T.seedRaw([__T.row(${NOW - 1000}, 1, 7, 't7', 'gpt-4o', 10, 10, 100)], { newest: ${NOW - 1000}, since: ${NOW - 1000} });`,
+    setup() {
+      state.pages.set(1, {
+        total: 2,
+        delay: 300,
+        items: [
+          { id: 1, created_at: NOW - 1000, token_id: 7, token_name: 't7', model_name: 'gpt-4o', prompt_tokens: 10, completion_tokens: 10, quota: 100 },
+          { id: 5001, created_at: NOW - 800, token_id: 7, token_name: 't7', model_name: 'gpt-4o', prompt_tokens: 1, completion_tokens: 1, quota: 10 },
+        ],
+      });
+    },
+    run: `(async () => {
+      var u0 = __app.state.usageRun || 0;
+      var p1 = __app.refreshUsageDelta();
+      var p2 = __app.refreshUsageDelta();
+      await Promise.all([p1, p2]);
+      await __T.sleep(80);
+      return { du: (__app.state.usageRun || 0) - u0, r: __T.raw(), a: __T.agg('24h') };
+    })()`,
+    check(out, ctx) {
+      return [
+        eq('usageRun 只该 +1（并发必须共享同一轮）', out.du, 1),
+        eq('p=1 只该被请求一次', ctx.mockLog.filter((r) => r.p === 1).length, 1),
+        eq('raw.rows 不得被重复拼接（seed 1 + 新增 1）', out.r.rows, 2),
+      ];
+    },
+  },
 
   {
     id: 'F14',
