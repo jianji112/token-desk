@@ -41,6 +41,19 @@ const ONLY = (argv.find((a) => a.startsWith('--only=')) || '').slice(7).split(',
 const EMIT_JSON = argv.includes('--json');
 /** 输出文件名（默认 baseline-before，修完一个补丁用 --out=p0-1-f2 留证据） */
 const OUT = (argv.find((a) => a.startsWith('--out=')) || '').slice(6).replace(/\.(txt|json)$/, '');
+/** --out 的相对名基准是 test/（HERE），不是 CWD。
+ *  所以 `--out=test/.run/x` 会落到 test/test/.run/x：跑满 50s+ 全绿之后才在最后一步 writeFileSync ENOENT、
+ *  exit 1，白烧一轮还容易让人以为是用例失败。开局就先把目录查掉。 */
+const resolveOut = (n) => (path.isAbsolute(n) ? n : path.join(HERE, n));
+function checkOutDir() {
+  const name = OUT || 'baseline-before';
+  const dir = path.dirname(resolveOut(name + '.txt'));
+  if (existsSync(dir)) return;
+  console.error('[harness] --out 的目标目录不存在：' + dir);
+  console.error('  相对名的基准是 test/，不是当前目录。仓库内的 .run/ 要写成 --out=.run/<名字>；');
+  console.error('  写别处请给绝对路径（如 --out=<TMPDIR>/td-verify/x）。');
+  process.exit(2);
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -957,6 +970,7 @@ const blocked = [
 
 // ─────────────────────────────────────────── 主流程
 async function main() {
+  checkOutDir(); // 目录不存在立刻 exit 2，别跑完 50s 才在写文件那一步崩
   acquireLock(); // 先拿锁再起服务/Chrome：抢不到锁直接 exit 2，绝不让两个 harness 并发跑
   // 锁管同仓；跨副本（csp-test/、审查副本）靠 /proc 扫 argv，同样 exit 2 走人
   const other = findOtherHarness();
@@ -1069,8 +1083,7 @@ async function main() {
 
   const text = lines.join('\n');
   const outName = OUT || 'baseline-before';
-  // 绝对路径必须原样使用：path.join(HERE, '/abs/x') 会拼成 test//abs/x 并在最后一步 ENOENT
-  const resolveOut = (n) => (path.isAbsolute(n) ? n : path.join(HERE, n));
+  // 绝对路径必须原样使用：path.join(HERE, '/abs/x') 会拼成 test//abs/x —— resolveOut 已处理
   const outFile = resolveOut(outName + '.txt');
   writeFileSync(outFile, text + '\n');
   console.log('\n' + text);
