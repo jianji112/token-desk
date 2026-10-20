@@ -272,7 +272,14 @@ async function openPage(cdp, port, cfg, preSeedJs = '') {
   window.__T = {
     row: (ts,id,tid,name,model,pt,ct,q) => [ts,tid,name,model,pt,ct,q,0,0,0,'',id],
     item: (ts,id,tid,name,model,pt,ct,q) => ({id:id,created_at:ts,token_id:tid,token_name:name,model_name:model,prompt_tokens:pt,completion_tokens:ct,quota:q,use_time:0.5,other:null}),
-    seedRaw: (rows,extra) => localStorage.setItem(__app.rawKey(), JSON.stringify(Object.assign({at:0,since:0,newest:0,pages:0,complete:false,rows:rows}, extra||{}))),
+    // 日志仓自 v3 起带网关指纹 base：缺指纹的仓来源不可验证，app 会整仓作废。
+    // 所以种子默认按「当前网关」打指纹；要模拟升级前的老仓（无 base），传 base: null。
+    seedRaw: (rows, extra) => {
+      const st = Object.assign({ at: 0, since: 0, newest: 0, pages: 0, complete: false, rows: rows }, extra || {});
+      if (!('base' in st)) st.base = __app.gatewayBase();
+      else if (st.base === null) delete st.base;
+      localStorage.setItem(__app.rawKey(), JSON.stringify(st));
+    },
     agg: (r) => { const a = __app.rawAgg(r); return { req:a.req, prompt:a.prompt, completion:a.completion, total:a.total, quota:a.quota, capped: !!a.capped, names: Object.values(a.byKey).map(x=>x.name), keys: Object.keys(a.byKey) }; },
     raw: () => __app.raw(),
     pf: () => __app.pf(),
@@ -559,7 +566,9 @@ const fixtures = [
     id: 'F8',
     name: '切换网关（旧网关日志仓必须清掉）',
     cfg: (port) => baseCfg(port),
-    seed: `var rows=[]; for (var i=0;i<100;i++) rows.push(__T.row(${NOW - 100} - i, i + 1, 9, 'A-token', 'gpt-4o', 1, 1, 10)); __T.seedRaw(rows, { coverFrom: ${NOW - DAY}, newest: ${NOW - 100} });`,
+    // 模拟升级前的 v3 老仓：有行有 coverFrom，但没有网关指纹 base。
+    // 真实升级场景走的就是这条「缺失」分支，所以这里不补 base（补了就只剩「网关不同」那条分支）
+    seed: `var rows=[]; for (var i=0;i<100;i++) rows.push(__T.row(${NOW - 100} - i, i + 1, 9, 'A-token', 'gpt-4o', 1, 1, 10)); __T.seedRaw(rows, { base: null, coverFrom: ${NOW - DAY}, newest: ${NOW - 100} });`,
     setup() {
       state.pages.set(1, {
         total: 2,
