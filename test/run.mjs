@@ -589,6 +589,41 @@ const fixtures = [
   },
 
   {
+    id: 'F8b',
+    name: '日常切换网关（仓里带的是旧网关指纹 → 同样必须整仓作废）',
+    cfg: (port) => baseCfg(port),
+    // F8 只覆盖「升级前老仓没有 base」的缺失分支。升级之后所有日常切换走的
+    // 都是这条「base 存在但与当前网关不等」的分支，两条分支必须有各自常驻用例，
+    // 否则 base !== cur 那条路径只有一次性副本探针做证，没有回归守门。
+    seed: `var rows=[]; for (var i=0;i<100;i++) rows.push(__T.row(${NOW - 100} - i, i + 1, 9, 'A-token', 'gpt-4o', 1, 1, 10)); __T.seedRaw(rows, { base: 'http://127.0.0.1:9/old-gw', coverFrom: ${NOW - DAY}, newest: ${NOW - 100} });`,
+    setup() {
+      state.pages.set(1, {
+        total: 2,
+        items: [
+          { id: 1, created_at: NOW - 50, token_id: 11, token_name: 'B-token', model_name: 'gpt-4o', prompt_tokens: 2, completion_tokens: 2, quota: 20 },
+          { id: 2, created_at: NOW - 60, token_id: 11, token_name: 'B-token', model_name: 'gpt-4o', prompt_tokens: 3, completion_tokens: 3, quota: 30 },
+        ],
+      });
+    },
+    run: `(async () => {
+      var before = {};
+      try { before = JSON.parse(localStorage.getItem(__app.rawKey()) || '{}'); } catch (e) {}
+      await __app.loadUsage('24h');
+      return { sb: before.base || null, a: __T.agg('24h'), r: __T.raw() };
+    })()`,
+    check(out, ctx) {
+      return [
+        // fixture 自检：种子必须真的落进异网关指纹。若哪天 seedRaw 改成无条件覆盖 base，
+        // 本用例会静默退化成 F8 的缺失分支，这里先把它按住
+        eq('种子仓必须带异网关指纹', out.sb, 'http://127.0.0.1:9/old-gw'),
+        eq('不得到旧网关数据上就报"已覆盖"', out.a.req, 2),
+        eq('byKey 只应有新网关令牌', out.a.names, ['B-token']),
+        eq('必须真的去请求新网关', ctx.mockLog.length > 0, true),
+      ];
+    },
+  },
+
+  {
     id: 'F9',
     name: '翻页竞态（头部插入新行导致 offset 重叠）',
     cfg: (port) => baseCfg(port),
@@ -723,6 +758,7 @@ const fixtures = [
       ];
     },
   },
+
 
   {
     id: 'F14',
