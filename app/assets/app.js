@@ -2200,7 +2200,7 @@
         if (S.tab === 'usage') renderUsage();
       }
       var chain = Promise.resolve();
-      if (st.rows.length) chain = chain.then(function () { return deltaFetch(st, S.usageRun, 6); });
+      if (st.rows.length) chain = chain.then(function () { return deltaStart(st, 6); });
       return chain.then(function () {
         if (!force && rawCovered(w.since)) return;
         return scanWindow(st, w, wantRange, force, quiet);
@@ -2396,24 +2396,41 @@
     });
   }
 
+  // 在飞 delta 共享：refreshUsageDelta 与 ensureWindow 可能在同一时刻要拉同一个窗口，
+  // 各发一轮既重复请求，又会两笔并发写 raw 仓（`acc.concat(st.rows)` 无去重，
+  // 谁后写谁把对方刚拉到的行当成旧行再拼一遍）
+  var deltaP = null;
+  function deltaStart(st, maxPages) {
+    if (deltaP) return deltaP;
+    var myRun = (S.usageRun = (S.usageRun || 0) + 1);
+    deltaP = deltaFetch(st, myRun, maxPages).then(function (added) {
+      deltaP = null;
+      return { run: myRun, added: added };
+    }, function (e) {
+      deltaP = null;
+      throw e;
+    });
+    return deltaP;
+  }
+
   function refreshUsageDelta() {
     var st = rawLoad();
     var range = CFG.range;
     if (!st.rows.length) { return loadUsage(range, true); }
     if (S.busy.usage || S.abort || S.usageP) return Promise.resolve();
-    var myRun = (S.usageRun = (S.usageRun || 0) + 1);
 
-    return deltaFetch(st, myRun, 6).then(function (added) {
-      if (myRun !== S.usageRun) return;
+    return deltaStart(st, 6).then(function (r) {
+      if (r.run !== S.usageRun) return;
       rawMeta();
       rawSave(true);
       S.usage = rawAggFor(range);
-      if (added) setSub('已更新 ' + hhmmss() + '（+' + added + ' 条）');
+      if (r.added) setSub('已更新 ' + hhmmss() + '（+' + r.added + ' 条）');
       delete S.errors.usage;
     }).catch(function () {
     }).then(function () {
-      if (myRun !== S.usageRun) return;
-      S.busy.usage = false;
+      // busy 只由置位者清。delta 全程不置 busy.usage（上面 busy=true 就直接返回了），
+      // 在这里写 false 只会清掉别人的标记：并发的全量扫描（loadUsage/ensureWindow
+      // 置的「统计中」）会被提前抹掉，UI 报已完成而扫描其实还在跑
       if (S.tab === 'overview') renderOverview();
       if (S.tab === 'usage') renderUsage();
       if (S.tab === 'tokens') renderTokens();
