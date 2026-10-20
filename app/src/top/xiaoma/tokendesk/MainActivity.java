@@ -35,6 +35,8 @@ public class MainActivity extends Activity {
     static final int DEF_CONNECT_MS = HttpJobRegistry.DEF_CONNECT_MS;
     static final int DEF_READ_MS = HttpJobRegistry.DEF_READ_MS;
     WebView webView;
+    // 记录当前主文档 URL 供 Bridge 白名单校验（Bridge 线程不碰 WebView）
+    AssetClient assetClient;
     final ExecutorService pool = Executors.newFixedThreadPool(4);
     // 在途请求登记表：提交/同 id 去重/取消。不依赖 Android API，可被 JVM 单测直接覆盖
     final HttpJobRegistry jobs = new HttpJobRegistry(pool, this::onHttpResult);
@@ -89,7 +91,8 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
         s.setAllowFileAccess(true);
-        s.setAllowContentAccess(true);
+        // content:// 通道对本应用无用，关掉以减少入口
+        s.setAllowContentAccess(false);
         s.setAllowFileAccessFromFileURLs(true);
         s.setAllowUniversalAccessFromFileURLs(true);
         s.setJavaScriptCanOpenWindowsAutomatically(false);
@@ -110,12 +113,23 @@ public class MainActivity extends Activity {
 
         webView.setBackgroundColor(Color.parseColor("#0b0f14"));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        webView.setWebViewClient(new AssetClient(this::applyPendingTab));
+        assetClient = new AssetClient(this::applyPendingTab);
+        webView.setWebViewClient(assetClient);
         webView.setWebChromeClient(new WebChromeClient());
         webView.addJavascriptInterface(new Bridge(this), "NativeBridge");
 
         setContentView(webView);
         webView.loadUrl(HOME_URL);
+    }
+
+    /**
+     * Bridge 调用来源是否受信：当前主文档必须仍在资产白名单内
+     * （scheme=file、路径 /android_asset/）。非资产页拉起的页面调进 Bridge 一律静默丢弃。
+     * 只读 volatile 字段，不触碰 WebView——本方法会在 JavaBridge 线程上被调用。
+     */
+    boolean callerTrusted() {
+        AssetClient c = assetClient;
+        return c != null && c.pageInAssetWhitelist();
     }
 
     private boolean isDebuggable() {
@@ -180,6 +194,14 @@ public class MainActivity extends Activity {
             this.host = host;
         }
 
+        /**
+         * 来源白名单：只放行来自 file:///android_asset/ 主文档的调用。
+         * 每个对外方法第一行都过这道闸；不受信时按各自失败语义静默返回，不抛异常。
+         */
+        private boolean allowed() {
+            return host.callerTrusted();
+        }
+
         @JavascriptInterface
         public void http(final String id, final String method, final String url,
                          final String headersJson, final String body) {
@@ -193,6 +215,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void httpOpts(final String id, final String method, final String url,
                              final String headersJson, final String body, final String optsJson) {
+            if (!allowed()) return;
             if (id == null || id.isEmpty()) return;
             int connectMs = DEF_CONNECT_MS;
             int readMs = DEF_READ_MS;
@@ -214,6 +237,7 @@ public class MainActivity extends Activity {
         /** 取消在途请求：中断等待并断开 socket，返回是否命中。 */
         @JavascriptInterface
         public boolean cancel(String id) {
+            if (!allowed()) return false;
             return host.jobs.cancel(id);
         }
 
@@ -221,26 +245,31 @@ public class MainActivity extends Activity {
         // 失败语义定版：可用性 false、写入 false、读取 null、清空无返回，均不抛异常、不回传内容。
         @JavascriptInterface
         public boolean secureAvailable() {
+            if (!allowed()) return false;
             return host.secureAvailable();
         }
 
         @JavascriptInterface
         public boolean secureSet(String key, String value) {
+            if (!allowed()) return false;
             return host.secureSet(key, value);
         }
 
         @JavascriptInterface
         public String secureGet(String key) {
+            if (!allowed()) return null;
             return host.secureGet(key);
         }
 
         @JavascriptInterface
         public void secureClear() {
+            if (!allowed()) return;
             host.secureClear();
         }
 
         @JavascriptInterface
         public void clearWebData() {
+            if (!allowed()) return;
             host.runOnUiThread(() -> {
                 try {
                     if (host.webView != null) {
@@ -256,11 +285,13 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void toast(final String msg) {
+            if (!allowed()) return;
             host.runOnUiThread(() -> Toast.makeText(host, msg, Toast.LENGTH_SHORT).show());
         }
 
         @JavascriptInterface
         public void copy(final String text) {
+            if (!allowed()) return;
             host.runOnUiThread(() -> {
                 ClipboardManager cm = (ClipboardManager) host.getSystemService(Context.CLIPBOARD_SERVICE);
                 if (cm != null) {
@@ -271,11 +302,13 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void finishApp() {
+            if (!allowed()) return;
             host.runOnUiThread(host::finish);
         }
 
         @JavascriptInterface
         public String appInfo() {
+            if (!allowed()) return "{}";
             String ver = "?";
             try {
                 ver = host.getPackageManager()
