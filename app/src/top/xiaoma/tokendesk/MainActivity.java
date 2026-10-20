@@ -192,8 +192,8 @@ public class MainActivity extends Activity {
             try {
                 if (optsJson != null && optsJson.length() > 2) {
                     JSONObject o = new JSONObject(optsJson);
-                    connectMs = clampTimeout(o.optInt("connectMs", DEF_CONNECT_MS));
-                    readMs = clampTimeout(o.optInt("readMs", DEF_READ_MS));
+                    connectMs = clampTimeout(o.optInt("connectMs", DEF_CONNECT_MS), DEF_CONNECT_MS);
+                    readMs = clampTimeout(o.optInt("readMs", DEF_READ_MS), DEF_READ_MS);
                 }
             } catch (Throwable ignored) {
                 // 参数解析失败就用默认值，不阻断请求
@@ -311,8 +311,8 @@ public class MainActivity extends Activity {
             conn = (HttpURLConnection) new URL(url).openConnection();
             if (holder != null) holder.set(conn);
             conn.setRequestMethod(method == null || method.isEmpty() ? "GET" : method.toUpperCase());
-            conn.setConnectTimeout(clampTimeout(connectMs));
-            conn.setReadTimeout(clampTimeout(readMs));
+            conn.setConnectTimeout(clampTimeout(connectMs, DEF_CONNECT_MS));
+            conn.setReadTimeout(clampTimeout(readMs, DEF_READ_MS));
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("Accept-Encoding", "identity");
             conn.setRequestProperty("User-Agent", "TokenDesk/1.0 (Android)");
@@ -352,9 +352,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 超时夹紧：非正值或越界一律回到安全区间，避免 JS 传 0 变成"永不超时"。 */
-    static int clampTimeout(int ms) {
-        if (ms <= 0) return DEF_READ_MS;
+    /** 超时夹紧：非正值回落到该参数的默认值，越界夹到 [MIN,MAX]，避免 JS 传 0 变成"永不超时"。 */
+    static int clampTimeout(int ms, int def) {
+        if (ms <= 0) return def;
         if (ms < MIN_TIMEOUT_MS) return MIN_TIMEOUT_MS;
         if (ms > MAX_TIMEOUT_MS) return MAX_TIMEOUT_MS;
         return ms;
