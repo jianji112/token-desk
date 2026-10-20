@@ -796,7 +796,15 @@ async function main() {
   const cdp = await connect(cdpPort);
 
   const results = [];
-  const started = Date.now();
+
+  // 首例导航冷启动：本进程第一次 Page.navigate 到真实页面要 25s 左右（Chrome/CDP 网络栈冷启，
+  // index.html 本身只有一个本地 style.css，没有任何外链），F1 因此恒 25s+，看起来像用例本身慢。
+  // 这里先开一页预热再丢弃，让第一个真用例的导航回到 <2s。只影响耗时，不涉及任何断言/fixture。
+  {
+    const warm = await openPage(cdp, port, baseCfg(port), '');
+    await cdp.send('Target.closeTarget', { targetId: warm.targetId }).catch(() => {});
+  }
+  const started = Date.now();   // 计时从预热之后开始：总耗时只算真实用例
 
   for (const f of fixtures) {
     if (ONLY.length && !ONLY.includes(f.id)) continue;
