@@ -37,7 +37,9 @@ body{
   background:linear-gradient(180deg,rgba(11,15,20,.98),rgba(11,15,20,.86) 70%,rgba(11,15,20,0));
   position:relative;z-index:6;
 }
-.brand{font-size:19px;font-weight:700;letter-spacing:.06em;display:flex;align-items:center;gap:8px}
+.brand{font-size:19px;font-weight:700;letter-spacing:.01em;display:flex;align-items:center;gap:8px;line-height:1}
+.brand .bt{display:inline-block;line-height:1}
+.brand .bt i{font-style:normal;color:var(--acc)}
 .brand::before{
   content:"";width:9px;height:9px;border-radius:3px;
   background:var(--acc);box-shadow:0 0 12px rgba(74,222,128,.9)
