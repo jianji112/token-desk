@@ -129,6 +129,10 @@
   var rawStore = null;
   var rawVer = 0;
   var rawAggMem = {};
+  // 诊断用：本页第一次 rawLoad() 时看到的是哪个网关。凭证通道改成异步/延后加载后，
+  // 启动期这里会拿到 ''（网关未知）→ 每次冷启动都判 base 不等 → 整仓清空重扫。
+  // 由 __app.rawFirstBase() 只读暴露，harness 断言它必须等于当前网关。
+  var rawFirstBase = null;
 
   // 网关指纹：日志仓必须记住自己属于哪个网关。仓里的令牌名 / 统计 / 覆盖率只对原网关有效，
   // 而 rawCovered() 只看 coverFrom —— 换网关后旧仓会被当成「已覆盖」直接零请求返回，
@@ -145,6 +149,7 @@
 
   function rawLoad() {
     var cur = rawBase();
+    if (rawFirstBase === null) rawFirstBase = cur;
     // 内存仓短路前先比网关：预置切换 / 手改地址 / __app 直调都可能绕过显式 rawReset()，
     // 只靠调用点兜会漏路径。base 变了就丢内存仓，否则旧网关的行会继续冒充新网关数据。
     if (rawStore) {
@@ -349,7 +354,75 @@
     } catch (e) { }
   }
 
+  // ── 凭证通道（Wave B）：4 个敏感键走 Android Keystore，不再落 localStorage 明文
+  // 契约（MainActivity.java:246-266 / SecureStore.java:82-154）：
+  //   secureAvailable():boolean  只验 KeyStore 能否 load —— true 不等于写得进去
+  //   secureSet(k,v):boolean     false = 键不在白名单 / 加密失败，必须回退并告知用户
+  //   secureGet(k):String        null = 没存过
+  // addJavascriptInterface 的方法在 JS 侧是同步调用，所以 loadCfg() 保持同步，
+  // CFG.newapiBase 必然在任何 rawLoad() 之前就绪（异步化会让启动期 rawBase() 拿到 ''，
+  // 每次冷启动都判网关不等 → 整仓清空重扫）。
+  var SECURE_KEYS = ['newapiBase', 'newapiToken', 'hubBase', 'hubPass'];
+  var SECURE_ERR = '';      // 非空 = 设置页标红
+  var secureProbed = null;  // null 未探测 / true 可用 / false 不可用
+  var secureDead = false;   // 首次写入被拒后置位：此后一律回退明文，不反复重试
+
+  function nativeBridge() { return window.NativeBridge || null; }
+
+  function secureAvailable() {
+    if (secureProbed !== null) return secureProbed;
+    var b = nativeBridge();
+    if (!b || typeof b.secureAvailable !== 'function') { secureProbed = false; return false; }
+    try { secureProbed = !!b.secureAvailable(); } catch (e) { secureProbed = false; }
+    return secureProbed;
+  }
+
+  function secureGet(k) {
+    if (!secureAvailable()) return null;
+    try {
+      var v = nativeBridge().secureGet(k);
+      return (v === null || v === undefined || v === '') ? null : String(v);
+    } catch (e) { return null; }
+  }
+
+  /** 只在真写成功时返回 true。available=true 但首次写入被拒（真机 KeyStore 生成密钥失败）时，
+   *  置 secureDead 让后续一律回退明文，并把原因留给设置页标红 —— 静默回退等于骗用户。 */
+  function secureSet(k, v) {
+    if (!secureAvailable() || secureDead) return false;
+    try {
+      if (nativeBridge().secureSet(k, v == null ? '' : String(v))) return true;
+      secureDead = true;
+      SECURE_ERR = '系统安全存储写入失败（' + k + '）：已回退本机存储，配置不会丢，但令牌是明文保存。';
+    } catch (e) {
+      secureDead = true;
+      SECURE_ERR = '系统安全存储异常（' + k + '：' + String((e && e.message) || e) + '）：已回退本机存储。';
+    }
+    return false;
+  }
+
+  function plainCfg(o) {
+    var out = {};
+    for (var k in o) if (SECURE_KEYS.indexOf(k) < 0) out[k] = o[k];
+    return out;
+  }
+
+  // 升级迁移：老版本把 4 个令牌明文写在 LS_KEY 里。安全通道可用时立刻搬进 Keystore
+  // 并把明文块重写成不含令牌的版本（真机验收第③项「旧 localStorage 键已清空」）。
+  function migrateCreds() {
+    if (!secureAvailable()) return;
+    var raw = '';
+    try { raw = localStorage.getItem(LS_KEY) || ''; } catch (e) { return; }
+    if (!raw) return;
+    var leak = false;
+    try {
+      var o = JSON.parse(raw);
+      for (var i = 0; i < SECURE_KEYS.length; i++) if (o && o[SECURE_KEYS[i]]) leak = true;
+    } catch (e) { return; }
+    if (leak) saveCfg();
+  }
+
   var CFG = loadCfg();
+  migrateCreds();   // 必须留在 boot() 之前：迁移只搬凭证，不碰日志仓
   var S = {
     tab: 'overview',
     modelsExpanded: false,
@@ -378,12 +451,27 @@
         for (var k2 in o) if (o[k2] !== undefined && o[k2] !== null) c[k2] = o[k2];
       }
     } catch (e) { }
+    // 敏感键以 Keystore 为准（覆盖 localStorage 里的旧值）；读不到（没存过 / 无桥）就沿用明文值。
+    // 这里必须同步：CFG 要在 boot() 之前定型。
+    for (var si = 0; si < SECURE_KEYS.length; si++) {
+      var sv = secureGet(SECURE_KEYS[si]);
+      if (sv !== null) c[SECURE_KEYS[si]] = sv;
+    }
     if (window.__BOOTSTRAP__) for (var k3 in window.__BOOTSTRAP__) c[k3] = window.__BOOTSTRAP__[k3];
     return c;
   }
 
   function saveCfg() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(CFG)); } catch (e) { }
+    // 4 个敏感键先写 Keystore：写成功就从明文块里摘掉（真机要求 localStorage 不留令牌）；
+    // 不可用（浏览器 / 无桥）或写失败（白名单外 / 加密失败）则回退进明文块，保证配置不丢，
+    // 失败原因由 secureSet() 记进 SECURE_ERR 在设置页标红。
+    var plain = plainCfg(CFG);
+    for (var i = 0; i < SECURE_KEYS.length; i++) {
+      var k = SECURE_KEYS[i];
+      var v = CFG[k] == null ? '' : String(CFG[k]);
+      if (!secureSet(k, v)) plain[k] = v;
+    }
+    try { localStorage.setItem(LS_KEY, JSON.stringify(plain)); } catch (e) { }
   }
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -1906,7 +1994,10 @@
       '<div class="field"><label>③ 用户 ID（数字）</label><input id="f-nauid" type="number" inputmode="numeric" value="' + esc(CFG.newapiUid) + '">' +
       '<div class="hint">New-API 里 Root 用户通常是 1。</div></div>' +
       '<div class="tok-acts"><button class="btn" id="f-natest">测试连接</button>' +
-      '<button class="btn ok" id="f-save">保存并连接</button></div></div>';
+      '<button class="btn ok" id="f-save">保存并连接</button></div>' +
+      (SECURE_ERR ? '<div class="note" style="color:#fca5a5;margin-top:8px">⚠ ' + esc(SECURE_ERR) + '</div>' : '') +
+      (secureAvailable() && !SECURE_ERR ? '<div class="note" style="margin-top:8px;color:var(--dim-2)">地址与令牌已存入系统安全存储（Android Keystore），本机明文配置里不再有令牌。</div>' : '') +
+      '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">账号池面板</div></div>' +
       '<div class="field"><label>地址</label><input id="f-hub" type="url" value="' + esc(CFG.hubBase) + '" placeholder="https://你的-hub-地址"></div>' +
@@ -2136,6 +2227,12 @@
     $('#f-clear').onclick = function () {
       confirmSheet('清除配置', '将删除本机保存的地址、令牌、面板密码，并清掉 WebView 缓存。', function () {
         try { localStorage.removeItem(LS_KEY); } catch (e) { }
+        // Keystore 里的 4 个凭证也必须清，否则「清除配置」只清了明文那一半
+        try {
+          if (window.NativeBridge && window.NativeBridge.secureClear) window.NativeBridge.secureClear();
+        } catch (e) { }
+        SECURE_ERR = '';
+        secureDead = false;
         cacheClearAll();
         rawReset();
         try {
@@ -2705,7 +2802,13 @@
     rawKey: function () { return RAW_KEY; },
     // 日志仓所属网关的规范值（只读）：harness 的 seedRaw 要按当前网关打指纹，
     // 否则「无 base 的老仓一律作废」会把每个 fixture 的 seed 都当成待清仓
-    gatewayBase: function () { return rawBase(); }
+    gatewayBase: function () { return rawBase(); },
+    // 本页第一次 rawLoad() 看到的网关值（只读）：凭证通道若被改成异步/延后加载，
+    // 这里会变成 ''，等于把「每次冷启动整仓清空重扫」摆到断言里
+    rawFirstBase: function () { return rawFirstBase; },
+    // 凭证通道状态（只读）+ 落盘入口，供 harness 断言「无桥时 4 键必须回退明文」
+    secureState: function () { return { available: secureAvailable(), dead: secureDead, err: SECURE_ERR, keys: SECURE_KEYS.slice() }; },
+    saveCfg: saveCfg
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
