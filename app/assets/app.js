@@ -70,14 +70,27 @@
 
   var MEM_ONLY = /\/api\/log\//;
 
+  var CACHE_MEM_MAX = 20;
+
   function cachePut(key, v) {
     var e = { at: Date.now(), v: v };
     cacheMem[key] = e;
+    cacheEvictMem();
     if (MEM_ONLY.test(key)) return;
     try {
       var json = JSON.stringify(e);
       if (json.length < 300000) localStorage.setItem(CACHE_PREFIX + key, json);
     } catch (err) { }
+  }
+
+  // /api/log/ 的缓存 key 带 start/end 时间戳：每次增量刷新都是一个新 key，而它
+  // 在 MEM_ONLY 里、从不落盘 → 不设上限的话整个日志页会一直堆在内存里（50 次刷新
+  // = 50 份整页数据）。按 at 淘汰最老的；时钟同毫秒时 sort 稳定，仍按插入序淘汰。
+  function cacheEvictMem() {
+    var keys = Object.keys(cacheMem);
+    if (keys.length <= CACHE_MEM_MAX) return;
+    keys.sort(function (a, b) { return (cacheMem[a].at || 0) - (cacheMem[b].at || 0); });
+    for (var i = 0, drop = keys.length - CACHE_MEM_MAX; i < drop; i++) delete cacheMem[keys[i]];
   }
 
   function purgeLegacyCache() {
