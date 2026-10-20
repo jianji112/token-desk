@@ -690,6 +690,7 @@ const fixtures = [
       });
     },
     run: `(async () => {
+      var u0 = __app.state.usageRun || 0;
       var p1 = __app.refreshUsageDelta();
       await __T.sleep(60);
       var p2 = __app.loadUsage('24h', true);
@@ -698,13 +699,18 @@ const fixtures = [
       var mid = !!__app.state.busy.usage;
       try { await p2; } catch (e) {}
       await __T.sleep(50);
-      return { mid, end: !!__app.state.busy.usage, r: __T.raw(), a: __T.agg('24h') };
+      return { mid, end: !!__app.state.busy.usage, r: __T.raw(), a: __T.agg('24h'), du: (__app.state.usageRun || 0) - u0 };
     })()`,
     check(out) {
       return [
         eq('delta 收尾时扫描仍在跑 → busy 必须仍为 true', out.mid, true),
         eq('全部结束后 busy 复位', out.end, false),
-        eq('raw.rows', out.r.rows, 3),
+        // 原期望 3 是把 seed 的 id=1 与 mock p1 的 id=1 当两行算，实为同一请求，去重后 = seed + id=5001 = 2
+        eq('raw.rows', out.r.rows, 2),
+        // 补偿断言：光看行数会被去重掩盖，新行必须真的落库（newest 前移到 mock 的 NOW-800）
+        eq('新行必须落库（newest 前移）', out.r.newest, NOW - 800),
+        // 真正卡「两轮 delta 并发」：并发时必须共享同一轮，usageRun 只该 +1
+        eq('usageRun 前后差（并发 delta 必须共享一轮）', out.du, 1),
       ];
     },
   },
