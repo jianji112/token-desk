@@ -2249,7 +2249,9 @@
           var r = rs[k];
           if (r.e) throw r.e;
           var d = r.d || {};
-          if (sc.total == null) sc.total = num(d.total);
+          // total 缺失 ≠ 0：NewAPI 少数版本/反代不返回 total，当成 0 会让
+          // got>=total 立刻成立 → 只翻 3 页就 rawMarkCovered，把"没扫完"标成"已覆盖"
+          if (sc.total == null && d.total != null && isFinite(Number(d.total))) sc.total = Number(d.total);
           var items = d.items || [];
           for (var j = 0; j < items.length; j++) {
             var it = items[j];

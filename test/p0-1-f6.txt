@@ -1,0 +1,21 @@
+=== token-desk P0-0 baseline (harness: public/test/run.mjs) ===
+生成时间   : 2026-10-20T17:51:25.250Z
+被测对象   : public/app/assets/app.js  sha256:e99177b5f9421047…  2585 行  115600 字节
+时钟       : 冻结 NOW=1761000000 (2025-10-20T22:40:00.000Z)
+浏览器     : google-chrome (headless=new, CDP)
+用例       : 1 条执行 / 1 条 blocked / 总耗时 25.8s
+
+说明：断言写的是"P0-1/P0-2 修好之后"的期望值，所以当前 FAIL = 待修，PASS = 现状即正确（防回归）。
+
+── F6 total 字段缺失（不得当作 0 → 不得标记已覆盖）  [PASS]  25752ms
+   ✓ coverFrom 必须保持 null（total 未知 ≠ 已覆盖）
+   ✓ 必须翻到 p=2
+   ✓ raw.rows
+
+── BLOCKED（本轮测不了，需要主代码加钩子或换 Java 单测）
+   F7c-java Java 侧超时/cancel（MainActivity.java:214-215 硬编码）
+       10s/45s 硬编码与缺失 cancel(id) 只能 Java 单测或真机验，web 侧不可达（F7c-js 已覆盖 JS 侧超时兜底）
+
+SUMMARY: 1 pass / 0 fail / 0 error / 1 blocked
+
+红用例清单：（无）
