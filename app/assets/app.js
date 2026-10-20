@@ -2602,6 +2602,9 @@
     cacheSize: function () { return Object.keys(cacheMem).length; },
     cacheClear: function () { cacheMem = {}; try { for (var i = localStorage.length - 1; i >= 0; i--) { var k = localStorage.key(i); if (k && k.indexOf(CACHE_PREFIX) === 0) localStorage.removeItem(k); } } catch (e) { } },
     __setNow: function (sec) { var t = sec * 1000; Date.now = function () { return t; }; },
+    // 缩放日志仓容量上限：F4b 要「少量行就够触发截断」，否则只能手写 40100 行数据。
+    // 传正数生效并返回生效值，传非法值仅返回当前值（不静默改坏）。恢复用 __setRawCap(40000)。
+    __setRawCap: function (n) { var v = Math.floor(num(n)); if (v > 0) RAW_CAP = v; return RAW_CAP; },
     __http: http,
     __pending: function () { return Object.keys(pending).length; },
     rawKey: function () { return RAW_KEY; }
