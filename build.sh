@@ -13,7 +13,8 @@ ENVFILE="${TD_ENV_FILE:-$ROOT/.env}"
 PKG="top.xiaoma.tokendesk"
 
 VERSION_FILE="${TD_VERSION_FILE:-$ROOT/VERSION}"
-BUMP="${TD_BUMP:-patch}"
+# 默认不 bump：开发迭代只出包不改版本号；发版时才显式 TD_BUMP=patch|minor|major
+BUMP="${TD_BUMP:-none}"
 DRY_RUN="${TD_DRY_RUN:-0}"
 
 V_NAME="1.0.0"; V_CODE="1"
@@ -34,7 +35,12 @@ case "$BUMP" in
   *)     _v_patch=$((_v_patch + 1)) ;;
 esac
 VERSION_NAME="$_v_major.$_v_minor.$_v_patch"
-VERSION_CODE=$((V_CODE + 1))
+# 只有显式 bump 才递增 versionCode；none 模式版本号与 code 全部保持原值
+if [ "$BUMP" = "none" ]; then
+  VERSION_CODE="$V_CODE"
+else
+  VERSION_CODE=$((V_CODE + 1))
+fi
 echo "版本：$V_NAME($V_CODE) → $VERSION_NAME($VERSION_CODE)  [bump=$BUMP]"
 if [ "$DRY_RUN" = "1" ]; then
   echo "（DRY_RUN=1：只打印版本号，不出包、不写回 VERSION）"
@@ -115,5 +121,32 @@ APK="$DIST/$APK_NAME"
 SIZE="$(du -h "$APK" | cut -f1)"
 echo "✅ 构建完成: $APK ($SIZE)"
 
-printf 'name=%s\ncode=%s\n' "$VERSION_NAME" "$VERSION_CODE" > "$VERSION_FILE"
-echo "🔖 已记录版本：$VERSION_NAME (versionCode $VERSION_CODE) → $VERSION_FILE"
+if [ "$BUMP" = "none" ]; then
+  echo "🔖 bump=none：不写回 $VERSION_FILE（版本仍为 $VERSION_NAME / code $VERSION_CODE）"
+else
+  printf 'name=%s\ncode=%s\n' "$VERSION_NAME" "$VERSION_CODE" > "$VERSION_FILE"
+  echo "🔖 已记录版本：$VERSION_NAME (versionCode $VERSION_CODE) → $VERSION_FILE"
+fi
+
+# dist 保留份数（默认 3，TD_KEEP_DIST 可调；只删本工具产出的 TokenDesk-*.apk/.idsig）
+KEEP_DIST="${TD_KEEP_DIST:-3}"
+prune_dist() {
+  case "$KEEP_DIST" in ''|*[!0-9]*) echo "⚠️ TD_KEEP_DIST=$KEEP_DIST 非数字，跳过 dist 清理"; return 0 ;; esac
+  if [ "$KEEP_DIST" -lt 1 ]; then
+    echo "⚠️ TD_KEEP_DIST=$KEEP_DIST，跳过 dist 清理"; return 0
+  fi
+  local stale
+  stale="$(ls -1t "$DIST"/TokenDesk-*.apk 2>/dev/null | tail -n +$((KEEP_DIST + 1)) || true)"
+  if [ -z "$stale" ]; then
+    echo "🧹 dist 无需清理（≤${KEEP_DIST} 份）"
+    return 0
+  fi
+  local f n=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rm -f -- "$f" "$f.idsig"
+    n=$((n + 1))
+  done <<< "$stale"
+  echo "🧹 dist 清理：保留最近 ${KEEP_DIST} 份，删除 ${n} 份旧包"
+}
+prune_dist
