@@ -24,31 +24,30 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class MainActivity extends Activity {
 
     private static final String HOME_URL = "file:///android_asset/index.html";
     // 超时默认值：与历史行为一致，可由 JS 通过 httpOpts 的 optsJson 覆盖
-    static final int DEF_CONNECT_MS = 10000;
-    static final int DEF_READ_MS = 45000;
-    static final int MIN_TIMEOUT_MS = 1000;
-    static final int MAX_TIMEOUT_MS = 120000;
+    static final int DEF_CONNECT_MS = HttpJobRegistry.DEF_CONNECT_MS;
+    static final int DEF_READ_MS = HttpJobRegistry.DEF_READ_MS;
     WebView webView;
     final ExecutorService pool = Executors.newFixedThreadPool(4);
-    // 在途请求表：id -> 任务句柄，用于 cancel(id) 与重复下发去重
-    final Map<String, Inflight> inflight = new ConcurrentHashMap<>();
+    // 在途请求登记表：提交/同 id 去重/取消。不依赖 Android API，可被 JVM 单测直接覆盖
+    final HttpJobRegistry jobs = new HttpJobRegistry(pool, this::onHttpResult);
 
-    /** 一次在途 HTTP 请求的句柄：Future 用于中断等待，conn 用于真正断开 socket。 */
-    static final class Inflight {
-        volatile Future<?> future;
-        volatile boolean cancelled;
-        final AtomicReference<HttpURLConnection> conn = new AtomicReference<>();
+    /** 原生请求完成回调（pool 线程）→ 回 UI 线程喂给 window.__nativeHttp。 */
+    private void onHttpResult(String id, String payload) {
+        final String js = "window.__nativeHttp && window.__nativeHttp("
+                + JSONObject.quote(id) + "," + JSONObject.quote(payload) + ")";
+        runOnUiThread(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(js, null);
+            }
+        });
     }
 
     @Override
@@ -140,20 +139,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         // 页面销毁时把在途请求全部断连，避免线程阻塞到 read 超时才退出
-        for (String id : inflight.keySet()) {
-            Inflight job = inflight.remove(id);
-            if (job == null) continue;
-            job.cancelled = true;
-            Future<?> f = job.future;
-            if (f != null) f.cancel(true);
-            HttpURLConnection c = job.conn.get();
-            if (c != null) {
-                try {
-                    c.disconnect();
-                } catch (Throwable ignored) {
-                }
-            }
-        }
+        jobs.cancelAll();
         pool.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("NativeBridge");
@@ -179,70 +165,33 @@ public class MainActivity extends Activity {
 
         /**
          * 带超时参数的 HTTP 桥。optsJson 形如 {"connectMs":10000,"readMs":45000}，
-         * 缺省或非法值回落 DEF_CONNECT_MS / DEF_READ_MS，并夹在 [MIN,MAX] 之间。
+         * 缺省或非法值回落各自默认值，并夹在 [MIN,MAX] 之间。
          */
         @JavascriptInterface
         public void httpOpts(final String id, final String method, final String url,
                              final String headersJson, final String body, final String optsJson) {
             if (id == null || id.isEmpty()) return;
-            // 同一 id 重复下发（JS 侧超时重试）时先撤掉旧的，避免同一请求被执行两次
-            cancel(id);
             int connectMs = DEF_CONNECT_MS;
             int readMs = DEF_READ_MS;
             try {
                 if (optsJson != null && optsJson.length() > 2) {
                     JSONObject o = new JSONObject(optsJson);
-                    connectMs = clampTimeout(o.optInt("connectMs", DEF_CONNECT_MS), DEF_CONNECT_MS);
-                    readMs = clampTimeout(o.optInt("readMs", DEF_READ_MS), DEF_READ_MS);
+                    connectMs = HttpJobRegistry.clampTimeout(o.optInt("connectMs", DEF_CONNECT_MS), DEF_CONNECT_MS);
+                    readMs = HttpJobRegistry.clampTimeout(o.optInt("readMs", DEF_READ_MS), DEF_READ_MS);
                 }
             } catch (Throwable ignored) {
                 // 参数解析失败就用默认值，不阻断请求
             }
-            final Inflight job = new Inflight();
             final int cm = connectMs;
             final int rm = readMs;
-            host.inflight.put(id, job);
-            Future<?> f = host.pool.submit(() -> {
-                if (job.cancelled) return;
-                String payload;
-                try {
-                    payload = doHttp(method, url, headersJson, body, cm, rm, job.conn);
-                } catch (Throwable t) {
-                    payload = "{\"error\":" + JSONObject.quote(String.valueOf(t.getMessage())) + "}";
-                }
-                host.inflight.remove(id, job);
-                // 已取消：不再回调 JS，避免上游重试与旧响应互相覆盖
-                if (job.cancelled) return;
-                final String js = "window.__nativeHttp && window.__nativeHttp("
-                        + JSONObject.quote(id) + "," + JSONObject.quote(payload) + ")";
-                host.runOnUiThread(() -> {
-                    if (host.webView != null) {
-                        host.webView.evaluateJavascript(js, null);
-                    }
-                });
-            });
-            job.future = f;
-            // 提交与 cancel 竞态：cancel 先到时把刚拿到的 future 补撤
-            if (job.cancelled) f.cancel(true);
+            // 去重/取消/回调全交给登记表：同 id 已在途会被丢弃，不再重复打到服务器
+            host.jobs.submit(id, holder -> doHttp(method, url, headersJson, body, cm, rm, holder));
         }
 
         /** 取消在途请求：中断等待并断开 socket，返回是否命中。 */
         @JavascriptInterface
         public boolean cancel(String id) {
-            if (id == null || id.isEmpty()) return false;
-            Inflight job = host.inflight.remove(id);
-            if (job == null) return false;
-            job.cancelled = true;
-            Future<?> f = job.future;
-            if (f != null) f.cancel(true);
-            HttpURLConnection c = job.conn.get();
-            if (c != null) {
-                try {
-                    c.disconnect();
-                } catch (Throwable ignored) {
-                }
-            }
-            return true;
+            return host.jobs.cancel(id);
         }
 
         @JavascriptInterface
@@ -311,8 +260,8 @@ public class MainActivity extends Activity {
             conn = (HttpURLConnection) new URL(url).openConnection();
             if (holder != null) holder.set(conn);
             conn.setRequestMethod(method == null || method.isEmpty() ? "GET" : method.toUpperCase());
-            conn.setConnectTimeout(clampTimeout(connectMs, DEF_CONNECT_MS));
-            conn.setReadTimeout(clampTimeout(readMs, DEF_READ_MS));
+            conn.setConnectTimeout(HttpJobRegistry.clampTimeout(connectMs, DEF_CONNECT_MS));
+            conn.setReadTimeout(HttpJobRegistry.clampTimeout(readMs, DEF_READ_MS));
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("Accept-Encoding", "identity");
             conn.setRequestProperty("User-Agent", "TokenDesk/1.0 (Android)");
@@ -350,14 +299,6 @@ public class MainActivity extends Activity {
         } finally {
             if (conn != null) conn.disconnect();
         }
-    }
-
-    /** 超时夹紧：非正值回落到该参数的默认值，越界夹到 [MIN,MAX]，避免 JS 传 0 变成"永不超时"。 */
-    static int clampTimeout(int ms, int def) {
-        if (ms <= 0) return def;
-        if (ms < MIN_TIMEOUT_MS) return MIN_TIMEOUT_MS;
-        if (ms > MAX_TIMEOUT_MS) return MAX_TIMEOUT_MS;
-        return ms;
     }
 
     private static String readAll(InputStream in) throws Exception {
