@@ -895,11 +895,13 @@ async function main() {
 
   const text = lines.join('\n');
   const outName = OUT || 'baseline-before';
-  const outFile = path.join(HERE, outName + '.txt');
+  // 绝对路径必须原样使用：path.join(HERE, '/abs/x') 会拼成 test//abs/x 并在最后一步 ENOENT
+  const resolveOut = (n) => (path.isAbsolute(n) ? n : path.join(HERE, n));
+  const outFile = resolveOut(outName + '.txt');
   writeFileSync(outFile, text + '\n');
   console.log('\n' + text);
   console.log(`\n[written] ${path.relative(process.cwd(), outFile)}`);
-  if (EMIT_JSON) writeFileSync(path.join(HERE, outName + '.json'), JSON.stringify({ NOW, sha, results, blocked }, null, 2));
+  if (EMIT_JSON) writeFileSync(resolveOut(outName + '.json'), JSON.stringify({ NOW, sha, results, blocked }, null, 2));
 
   process.exitCode = err ? 2 : 0;
 }
