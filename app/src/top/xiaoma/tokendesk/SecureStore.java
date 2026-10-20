@@ -8,6 +8,9 @@ import android.util.Base64;
 
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -45,6 +48,20 @@ public final class SecureStore {
     private static final int TAG_BITS = 128;
     private static final int KEY_BITS = 256;
 
+    /**
+     * 允许进 Keystore 的凭证键白名单（Wave B 定版，仅这 4 个）。
+     * 白名单以外的 key：{@link #secureSet} 返回 false、{@link #secureGet} 返回 null，
+     * 不落盘、不读取、不抛异常。目的是把 JS 侧任意键写满 Keystore 的口子收掉，
+     * 也保证 {@code td_secure} 里只可能存在业务认可的 4 个条目。
+     */
+    private static final Set<String> ALLOWED_KEYS = new HashSet<>(Arrays.asList(
+            "newapiBase", "newapiToken", "hubBase", "hubPass"));
+
+    /** key 是否在凭证白名单内。 */
+    static boolean allowedKey(String key) {
+        return key != null && ALLOWED_KEYS.contains(key);
+    }
+
     private final Context appContext;
 
     public SecureStore(Context context) {
@@ -74,7 +91,7 @@ public final class SecureStore {
 
     /** 加密写入单个 key。成功返回 true；任何异常返回 false（不抛出、不带内容）。 */
     public boolean secureSet(String key, String value) {
-        if (key == null || key.isEmpty() || value == null) return false;
+        if (!allowedKey(key) || value == null) return false;
         try {
             byte[] iv;
             byte[] cipherText;
@@ -98,7 +115,7 @@ public final class SecureStore {
 
     /** 解密读取单个 key。不存在、密文损坏、密钥丢失一律返回 null。 */
     public String secureGet(String key) {
-        if (key == null || key.isEmpty()) return null;
+        if (!allowedKey(key)) return null;
         String encoded;
         try {
             encoded = prefs().getString(key, null);
