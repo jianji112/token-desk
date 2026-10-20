@@ -216,7 +216,7 @@ async function openPage(cdp, port, cfg, preSeedJs = '') {
   window.__T = {
     row: (ts,id,tid,name,model,pt,ct,q) => [ts,tid,name,model,pt,ct,q,0,0,0,'',id],
     item: (ts,id,tid,name,model,pt,ct,q) => ({id:id,created_at:ts,token_id:tid,token_name:name,model_name:model,prompt_tokens:pt,completion_tokens:ct,quota:q,use_time:0.5,other:null}),
-    seedRaw: (rows,extra) => localStorage.setItem('tokendesk.rawlog.v2', JSON.stringify(Object.assign({at:0,since:0,newest:0,pages:0,complete:false,rows:rows}, extra||{}))),
+    seedRaw: (rows,extra) => localStorage.setItem(__app.rawKey(), JSON.stringify(Object.assign({at:0,since:0,newest:0,pages:0,complete:false,rows:rows}, extra||{}))),
     agg: (r) => { const a = __app.rawAgg(r); return { req:a.req, prompt:a.prompt, completion:a.completion, total:a.total, quota:a.quota, capped: !!a.capped, names: Object.values(a.byKey).map(x=>x.name), keys: Object.keys(a.byKey) }; },
     raw: () => __app.raw(),
     pf: () => __app.pf(),

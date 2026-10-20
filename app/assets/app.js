@@ -107,7 +107,10 @@
     } catch (e) { return null; }
   }
 
-  var RAW_KEY = 'tokendesk.rawlog.v2';
+  // v3：行结构多了第 12 位（日志 id），rokey 纳入 id 后旧缓存无法与新行去重，
+  // 直接弃用旧键（只是本地缓存，下次扫描自愈）；旧键必须 remove，否则白占 5–10MB 配额
+  var RAW_KEY = 'tokendesk.rawlog.v3';
+  var RAW_KEY_LEGACY = 'tokendesk.rawlog.v2';
   var RAW_CAP = 40000;
   var RAW_KEEP_SEC = 7 * 86400 + 12 * 3600;
   var rawStore = null;
@@ -123,6 +126,7 @@
         if (o && o.rows && o.rows.length) { rawStore = o; return rawStore; }
       }
     } catch (e) { }
+    try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e2) { }   // v2 缓存一次性清掉
     rawStore = { at: 0, since: 0, newest: 0, pages: 0, complete: false, rows: [] };
     return rawStore;
   }
@@ -191,7 +195,12 @@
     rawVer++;
   }
 
-  function rokey(r) { return r[0] + '|' + r[1] + '|' + r[3] + '|' + r[4] + '|' + r[5]; }
+  // 去重键必须含日志 id：同一秒、同 token/model/用量的两条不同请求，靠前 5 位
+  // 完全一样，会被当成同一条合并（少算一次请求，且 fillTiming 把 A 的时延写到 B）
+  function rokey(r) {
+    var k = r[0] + '|' + r[1] + '|' + r[3] + '|' + r[4] + '|' + r[5];
+    return (r[11] == null || r[11] === '') ? k : (k + '|' + r[11]);
+  }
 
   function logTiming(it) {
     var total = 0, ttft = 0, bad = 0, eff = '';
@@ -223,7 +232,8 @@
   function logRow(it) {
     var t = logTiming(it);
     return [num(it.created_at), it.token_id, it.token_name, it.model_name,
-      num(it.prompt_tokens), num(it.completion_tokens), num(it.quota), t[0], t[1], t[2], t[3]];
+      num(it.prompt_tokens), num(it.completion_tokens), num(it.quota), t[0], t[1], t[2], t[3],
+      (it.id == null ? '' : it.id)];
   }
 
   function rowIdx(st, n) {
@@ -2563,7 +2573,8 @@
     cacheClear: function () { cacheMem = {}; try { for (var i = localStorage.length - 1; i >= 0; i--) { var k = localStorage.key(i); if (k && k.indexOf(CACHE_PREFIX) === 0) localStorage.removeItem(k); } } catch (e) { } },
     __setNow: function (sec) { var t = sec * 1000; Date.now = function () { return t; }; },
     __http: http,
-    __pending: function () { return Object.keys(pending).length; }
+    __pending: function () { return Object.keys(pending).length; },
+    rawKey: function () { return RAW_KEY; }
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
