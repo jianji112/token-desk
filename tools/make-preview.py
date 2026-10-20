@@ -66,24 +66,21 @@ def build_usage():
         "gemini-2.5-pro": {"req": 76, "tokens": 6100000},
         "qwen3-max": {"req": 34, "tokens": 1900000},
     }
-    recent = [
-        {"created_at": now() - 42, "token_name": "研发主力", "model_name": "gpt-4o-mini",
-         "prompt_tokens": 12480, "completion_tokens": 860, "quota": 921, "total_ms": 3120, "ttft_ms": 880, "bad": 0},
-        {"created_at": now() - 128, "token_name": "内容生产", "model_name": "claude-sonnet-4",
-         "prompt_tokens": 8960, "completion_tokens": 1440, "quota": 1180, "total_ms": 4680, "ttft_ms": 1120, "bad": 0},
-        {"created_at": now() - 205, "token_name": "研发主力", "model_name": "deepseek-chat",
-         "prompt_tokens": 15220, "completion_tokens": 640, "quota": 733, "total_ms": 2240, "ttft_ms": 520, "bad": 0},
-        {"created_at": now() - 316, "token_name": "离线批处理", "model_name": "gemini-2.5-pro",
-         "prompt_tokens": 24800, "completion_tokens": 1980, "quota": 1560, "total_ms": 6120, "ttft_ms": 1640, "bad": 0},
-        {"created_at": now() - 402, "token_name": "研发主力", "model_name": "gpt-4o-mini",
-         "prompt_tokens": 6420, "completion_tokens": 420, "quota": 486, "total_ms": 1740, "ttft_ms": 610, "bad": 0},
-        {"created_at": now() - 540, "token_name": "测试临时", "model_name": "qwen3-max",
-         "prompt_tokens": 3120, "completion_tokens": 1680, "quota": 402, "total_ms": 2980, "ttft_ms": 720, "bad": 0},
-        {"created_at": now() - 668, "token_name": "内容生产", "model_name": "gpt-4o-mini",
-         "prompt_tokens": 11400, "completion_tokens": 720, "quota": 812, "total_ms": 2560, "ttft_ms": 690, "bad": 0},
-        {"created_at": now() - 794, "token_name": "研发主力", "model_name": "claude-sonnet-4",
-         "prompt_tokens": 9840, "completion_tokens": 1260, "quota": 1044, "total_ms": 3820, "ttft_ms": 980, "bad": 0},
-    ]
+    recent = []
+    seeds = [("研发主力", "gpt-4o-mini", 12480, 860, 921, 3120, 880, "high"),
+             ("内容生产", "claude-sonnet-4", 8960, 1440, 1180, 4680, 1120, "high"),
+             ("研发主力", "deepseek-chat", 15220, 640, 733, 2240, 520, "max"),
+             ("离线批处理", "gemini-2.5-pro", 24800, 1980, 1560, 6120, 1640, "high"),
+             ("研发主力", "gpt-4o-mini", 6420, 420, 486, 1740, 610, "high"),
+             ("测试临时", "qwen3-max", 3120, 1680, 402, 2980, 720, "none"),
+             ("内容生产", "gpt-4o-mini", 11400, 720, 812, 2560, 690, "high"),
+             ("研发主力", "claude-sonnet-4", 9840, 1260, 1044, 3820, 980, "max")]
+    for i in range(20):
+        nm, md, pt, ct, q, tm, tt, ef = seeds[i % len(seeds)]
+        recent.append({"created_at": now() - 42 - i * 86 - (i * 13) % 40,
+                       "token_name": nm, "model_name": md,
+                       "prompt_tokens": pt + (i * 137) % 900, "completion_tokens": ct + (i * 29) % 120,
+                       "quota": q, "total_ms": tm, "ttft_ms": tt, "bad": 0, "effort": ef})
     return {
         "range": "24h", "since": now() - 86400, "label": "最近 24 小时",
         "req": 1286, "prompt": 121900000, "completion": 6560000, "total": 128460000,
@@ -177,6 +174,13 @@ def build_wb():
             {"realm": "cn", "model": "gemini-2.5-pro", "available": 2, "cooling": 0, "total_remaining": 8800000},
             {"realm": "cn", "model": "qwen3-max", "available": 1, "cooling": 0, "total_remaining": 4200000},
             {"realm": "intl", "model": "kimi-k2", "available": 1, "cooling": 0, "total_remaining": 2100000},
+        ], "rows": [
+            {"uid": "m1", "nickname": "主力账号", "realm": "cn", "model": "deepseek-chat", "cooling": True,
+             "reset_at": time.time() + 9.8 * 3600},
+            {"uid": "m2", "nickname": "备用账号", "realm": "cn", "model": "deepseek-chat", "cooling": True,
+             "reset_at": time.time() + 40 * 60},
+            {"uid": "m3", "nickname": "主力账号", "realm": "cn", "model": "gpt-4o-mini", "cooling": False,
+             "reset_at": 0},
         ]},
         "models": {
             "cn": [{"id": "gpt-4o-mini", "credits": "x1.00"}, {"id": "deepseek-chat", "credits": "x0.28"},
@@ -196,7 +200,7 @@ INJECT = """
   localStorage.setItem('tokendesk.rawlog.v2', JSON.stringify(__RAW__));
   S.errors = {}; S.busy = {}; S.usageLive = null;
   S.tokens = __TOKENS__;
-  S.over = {user: {request_count: 41982, username: 'demo'}, at: Date.now(), tokenTotal: 6, tokenTruncated: false};
+  S.over = {at: Date.now(), tokenTotal: 6, tokenTruncated: false};
   S.rate = {unit: 500000, cny: 7.3, sym: '\\u00a5', kind: 'CNY'};
   S.usage = __USAGE__;
   S.wb = __WB__;

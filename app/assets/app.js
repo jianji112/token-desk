@@ -194,7 +194,7 @@
   function rokey(r) { return r[0] + '|' + r[1] + '|' + r[3] + '|' + r[4] + '|' + r[5]; }
 
   function logTiming(it) {
-    var total = 0, ttft = 0, bad = 0;
+    var total = 0, ttft = 0, bad = 0, eff = '';
     var u = num(it && it.use_time);
     if (u > 0) total = Math.round(u * 1000);
     var o = null;
@@ -206,6 +206,7 @@
       if (fr > 0) ttft = Math.round(fr);
       var ss = o.stream_status || null;
       if (ss && typeof ss === 'object' && String(ss.status || '') === 'error') bad = 1;
+      if (o.reasoning_effort != null) eff = String(o.reasoning_effort).slice(0, 12);
       var ai = o.admin_info || null;
       var pol = ai && ai.request_policy;
       if (pol && pol.length) {
@@ -216,13 +217,13 @@
       }
     }
     if (ttft > total) ttft = 0;
-    return [total, ttft, bad];
+    return [total, ttft, bad, eff];
   }
 
   function logRow(it) {
     var t = logTiming(it);
     return [num(it.created_at), it.token_id, it.token_name, it.model_name,
-      num(it.prompt_tokens), num(it.completion_tokens), num(it.quota), t[0], t[1], t[2]];
+      num(it.prompt_tokens), num(it.completion_tokens), num(it.quota), t[0], t[1], t[2], t[3]];
   }
 
   function rowIdx(st, n) {
@@ -233,12 +234,18 @@
 
   function fillTiming(idx, row) {
     var o = idx[rokey(row)];
-    if (!o || !row[7]) return false;
-    if (o[7] === row[7] && o[8] === row[8] && (o[9] || 0) === (row[9] || 0)) return false;
-    o[7] = row[7];
-    o[8] = row[8];
-    o[9] = row[9] || 0;
-    return true;
+    if (!o) return false;
+    var changed = false;
+    if (row[7]) {
+      if (o[7] !== row[7] || o[8] !== row[8] || (o[9] || 0) !== (row[9] || 0)) {
+        o[7] = row[7];
+        o[8] = row[8];
+        o[9] = row[9] || 0;
+        changed = true;
+      }
+    }
+    if (row[10] && o[10] !== row[10]) { o[10] = row[10]; changed = true; }
+    return changed;
   }
 
   function rawAggFor(range) {
@@ -255,7 +262,7 @@
     for (var i = 0; i < st.rows.length; i++) {
       var r = st.rows[i];
       if (r[0] < w.since) break;
-      absorbParts(agg, r[1] != null ? ('#' + r[1]) : (r[2] || '(未命名令牌)'), r[2], r[3], r[4], r[5], r[6], r[0], r[7], r[8], r[9]);
+      absorbParts(agg, r[1] != null ? ('#' + r[1]) : (r[2] || '(未命名令牌)'), r[2], r[3], r[4], r[5], r[6], r[0], r[7], r[8], r[9], r[10]);
     }
     agg.pages = Math.max(1, Math.round(st.rows.length / 100));
     rawAggMem[range] = { ver: rawVer, agg: agg };
@@ -278,6 +285,7 @@
   var S = {
     tab: 'overview',
     modelsExpanded: false,
+    remOpen: {},
     tokens: null,
     over: null,
     usage: null,
@@ -434,6 +442,7 @@
     return { since: now - 86400, label: '最近 24 小时' };
   }
   var RANGE_NAME = { today: '今天', '24h': '24 小时', '7d': '7 天' };
+  var RECENT_MAX = 20;
 
   var toastTimer = null;
   function toast(msg, kind) {
@@ -710,15 +719,14 @@
   function loadOverview(force) {
     if (S.busy.over && !force) return Promise.resolve();
     S.busy.over = true;
-    setSub('读取 NewAPI 账户…');
+    setSub('读取 NewAPI 令牌…');
     return Promise.all([
-      napiRaw('/api/user/self', 'GET', undefined, !!force),
       loadAllTokens(!!force),
       napiRaw('/api/status', 'GET', undefined, !!force).catch(function () { return null; })
     ]).then(function (res) {
-      S.over = { user: res[0] || {}, at: Date.now(), tokenTotal: res[1].total, tokenTruncated: res[1].truncated };
-      S.tokens = normTokens(res[1]);
-      S.rate = parseRate(res[2]);
+      S.over = { at: Date.now(), tokenTotal: res[0].total, tokenTruncated: res[0].truncated };
+      S.tokens = normTokens(res[0]);
+      S.rate = parseRate(res[1]);
       delete S.errors.overview;
       setSub('已更新 ' + hhmmss());
     }).catch(function (e) {
@@ -771,7 +779,7 @@
     return mine.then(function () { if (S.usageP === mine) S.usageP = null; });
   }
 
-  function absorbParts(agg, k, name, m, pt, ct, q, ts, totalMs, ttftMs, bad) {
+  function absorbParts(agg, k, name, m, pt, ct, q, ts, totalMs, ttftMs, bad, eff) {
     name = name || '(未命名令牌)';
     m = m || '(未知模型)';
     pt = num(pt); ct = num(ct); q = num(q);
@@ -788,11 +796,29 @@
     var M = agg.byModel[m] || (agg.byModel[m] = { req: 0, tokens: 0 });
     M.req++; M.tokens += tk;
 
-    if (agg.recent.length < 15) {
+    if (agg.recent.length < RECENT_MAX) {
       agg.recent.push({ created_at: ts, token_name: name, model_name: m,
         prompt_tokens: pt, completion_tokens: ct, quota: q,
-        total_ms: num(totalMs), ttft_ms: num(ttftMs), bad: num(bad) });
+        total_ms: num(totalMs), ttft_ms: num(ttftMs), bad: num(bad), effort: eff || '' });
     }
+  }
+
+  function clockOf(sec) {
+    var d = new Date(num(sec) * 1000);
+    var s = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    var n = new Date();
+    if (d.getFullYear() !== n.getFullYear() || d.getMonth() !== n.getMonth() || d.getDate() !== n.getDate()) {
+      s = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + s;
+    }
+    return s;
+  }
+
+  function effortTag(eff) {
+    var e = String(eff || '').trim();
+    if (!e) return '';
+    var k = e.toLowerCase();
+    var label = (k === 'none' || k === 'null' || k === 'off') ? '关' : esc(e);
+    return ' · <span class="eff e-' + esc(k.replace(/[^a-z0-9_-]/g, '')) + '">' + label + '</span>';
   }
 
   function speedText(r) {
@@ -809,15 +835,16 @@
     else if (tot > 0) tps = ct / (tot / 1000);
     var parts = [];
     if (tps > 0) parts.push(Math.round(tps) + ' t/s');
-    if (ttft > 0) parts.push('首字 ' + (ttft / 1000).toFixed(1) + ' s');
+    if (ttft > 0) parts.push('<span class="ttft">' + (ttft / 1000).toFixed(1) + ' s</span>');
     if (!parts.length) return secs;
     return parts.join(' ');
   }
 
   function absorb(agg, it) {
     var k = it.token_id != null ? ('#' + it.token_id) : (it.token_name || '(未命名令牌)');
+    var t = logTiming(it);
     absorbParts(agg, k, it.token_name, it.model_name,
-      it.prompt_tokens, it.completion_tokens, it.quota, it.created_at);
+      it.prompt_tokens, it.completion_tokens, it.quota, it.created_at, t[0], t[1], t[2], t[3]);
   }
 
   function toggleAccount(uid, enable) {
@@ -908,7 +935,6 @@
 
   function renderOverview() {
     var el = viewEl('overview');
-    var u = (S.over && S.over.user) || {};
     var usage = S.usage;
     var live = S.usageLive;
     var show = live || usage;
@@ -916,6 +942,11 @@
     var html = '';
 
     if (S.errors.overview) html += errBox(S.errors.overview);
+
+    var wb0 = S.wb;
+    var cm0 = wb0 ? creditMap(wb0) : { today: {} };
+    var credSum = 0, credHas = false;
+    for (var ck0 in cm0.today) { credSum += num(cm0.today[ck0]); credHas = true; }
 
     html += '<div class="hero">' +
       '<div class="hero-top"><div>' +
@@ -929,7 +960,7 @@
       '<div class="hero-grid">' +
       '<div class="mini"><div class="k">请求</div><div class="v mono">' + (show ? fmtInt(show.req) : '—') + '</div></div>' +
       '<div class="mini"><div class="k">令牌 Key 数</div><div class="v mono">' + (S.tokens ? S.tokens.length : '—') + '</div></div>' +
-      '<div class="mini"><div class="k">累计请求</div><div class="v mono">' + (u.request_count == null ? '—' : fmtInt(u.request_count)) + '</div></div>' +
+      '<div class="mini"><div class="k">今日积分</div><div class="v mono cred">' + (credHas ? fmtCred(credSum) : '—') + '</div></div>' +
       '</div></div>';
 
     var keys = show ? Object.keys(show.byKey).map(function (k) {
@@ -958,13 +989,13 @@
 
     var recent = (show && show.recent) || [];
     html += '<div class="card"><div class="card-h"><div class="card-t">最近请求</div>' +
-      '<span class="pill mute">' + (recent.length ? '最新 ' + Math.min(recent.length, 8) + ' 条' : '—') + '</span></div>';
+      '<span class="pill mute">' + (recent.length ? '最新 ' + Math.min(recent.length, RECENT_MAX) + ' 条' : '—') + '</span></div>';
     if (!recent.length) {
       html += '<div class="empty">暂无请求记录</div>';
     } else {
-      recent.slice(0, 8).forEach(function (r) {
+      recent.slice(0, RECENT_MAX).forEach(function (r) {
         html += '<div class="row"><div class="grow"><div class="name">' + esc(r.model_name || '—') + '</div>' +
-          '<div class="meta">' + pv(r.token_name || '—') + ' · ' + fmtTime(r.created_at) + ' · ' + speedText(r) + '</div></div>' +
+          '<div class="meta">' + pv(r.token_name || '—') + ' · ' + clockOf(r.created_at) + ' · ' + speedText(r) + effortTag(r.effort) + '</div></div>' +
           '<div class="val mono">' + fmtTok(num(r.prompt_tokens) + num(r.completion_tokens)) + '</div></div>';
       });
     }
@@ -1006,6 +1037,14 @@
     var s = 0;
     if (S.tokens) for (var i = 0; i < S.tokens.length; i++) s += num(S.tokens[i].used);
     return s;
+  }
+
+  function fmtCred(v) {
+    v = num(v);
+    if (v >= 10000) return fmtQty(v);
+    var s = v.toFixed(2);
+    var p = s.split('.');
+    return p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + p[1];
   }
 
   function cumQuota(used, w) {
@@ -1469,6 +1508,28 @@
     return 0;
   }
 
+  function remKey(m) { return (m.realm || '') + '|' + (m.model || ''); }
+
+  function remCoolRows(wb, m) {
+    var rows = (wb && wb.remain && wb.remain.rows) || [];
+    var now = Math.floor(Date.now() / 1000);
+    var mk = nameKey(m.model || '');
+    return rows.filter(function (r) {
+      if (!r || !r.cooling) return false;
+      if (num(r.reset_at) <= now) return false;
+      if ((r.realm || '') !== (m.realm || '')) return false;
+      return r.model === m.model || nameKey(r.model || '') === mk;
+    }).sort(function (a, b) { return num(a.reset_at) - num(b.reset_at); });
+  }
+
+  function untilText(sec) {
+    var d = num(sec) - Math.floor(Date.now() / 1000);
+    if (d <= 0) return '已恢复';
+    if (d < 3600) return Math.ceil(d / 60) + ' 分钟';
+    if (d < 86400) return (d / 3600).toFixed(d < 36000 ? 1 : 0) + ' 小时';
+    return (d / 86400).toFixed(1) + ' 天';
+  }
+
   function accIssues(a) {
     var out = [], seen = {};
     var now = Math.floor(Date.now() / 1000);
@@ -1601,16 +1662,29 @@
       var TOPN = 3;
       var shown = S.modelsExpanded ? rem.slice(0, 40) : rem.slice(0, TOPN);
       var folded = Math.max(0, Math.min(rem.length, 40) - shown.length);
-      html += '<table class="tbl"><thead><tr><th>模型</th><th>区域</th><th>24h 请求</th><th>可用号</th><th>剩余额度</th></tr></thead><tbody>';
+      html += '<table class="tbl tbl5"><thead><tr><th>模型</th><th>区域</th><th>请求</th><th>可用</th><th>剩余</th></tr></thead><tbody>';
       shown.forEach(function (m) {
         var ok = num(m.available) > 0;
         var hit = usedReq24(used24, m.model, m.realm);
-        html += '<tr' + (ok ? '' : ' style="opacity:.55"') + '><td title="' + esc(m.model) + '">' + esc(m.model) + '</td>' +
+        var cools = num(m.cooling) > 0 ? remCoolRows(wb, m) : [];
+        var rk = remKey(m);
+        var open = cools.length > 0 && !!(S.remOpen && S.remOpen[rk]);
+        html += '<tr' + (cools.length ? ' class="rem-row' + (open ? ' open' : '') + '" data-act="rem-toggle" data-key="' + esc(rk) + '"' : '') +
+          (ok ? '' : ' style="opacity:.55"') + '><td title="' + esc(m.model) + '">' + esc(m.model) +
+          (cools.length ? '<span class="rem-caret">▸</span>' : '') + '</td>' +
           '<td><span class="pill ' + (m.realm === 'cn' ? 'info' : 'mute') + '">' + esc(m.realm || '?') + '</span></td>' +
           '<td class="mono" style="text-align:right">' + (hit > 0 ? fmtInt(hit) : '—') + '</td>' +
           '<td class="mono">' + (m.cooling ? '<span class="pill warn">' + num(m.available) + ' / 冷' + num(m.cooling) + '</span>'
             : '<span class="pill ' + (ok ? 'ok' : 'off') + '">' + num(m.available) + '</span>') + '</td>' +
           '<td class="mono">' + (m.total_remaining == null || num(m.total_remaining) === 0 ? '—' : fmtTok(m.total_remaining)) + '</td></tr>';
+        if (open) {
+          html += '<tr class="rem-detail"><td colspan="5"><div class="rem-list">' +
+            cools.map(function (r) {
+              var rt = num(r.reset_at);
+              return '<div class="rem-i"><span class="rem-n">' + pv(r.nickname || String(r.uid || '').slice(0, 8), true) + '</span>' +
+                '<span class="rem-t">' + fmtShort(rt) + ' · 剩 ' + untilText(rt) + '</span></div>';
+            }).join('') + '</div></td></tr>';
+        }
       });
       html += '</tbody></table>';
       if (rem.length > TOPN) {
@@ -2289,8 +2363,8 @@
     timingBackfilled = true;
     var st = rawLoad();
     if (!st.rows.length) return Promise.resolve(0);
-    var need = 0, lim = Math.min(40, st.rows.length);
-    for (var i = 0; i < lim; i++) if (!st.rows[i][7] || st.rows[i][9] === undefined) need++;
+    var need = 0, lim = Math.min(100, st.rows.length);
+    for (var i = 0; i < lim; i++) if (!st.rows[i][7] || st.rows[i][9] === undefined || st.rows[i][10] === undefined) need++;
     if (!need) return Promise.resolve(0);
     var idx = rowIdx(st, 800);
     return napiRaw('/api/log/?p=1&page_size=100&type=2', 'GET', undefined, true).then(function (d) {
@@ -2400,6 +2474,13 @@
       if (act === 'tok-range') { setRange(btn.getAttribute('data-range')); return; }
       if (act === 'models-more') {
         S.modelsExpanded = !S.modelsExpanded;
+        renderWB();
+        return;
+      }
+      if (act === 'rem-toggle') {
+        var rk2 = btn.getAttribute('data-key') || '';
+        if (!S.remOpen) S.remOpen = {};
+        if (S.remOpen[rk2]) delete S.remOpen[rk2]; else S.remOpen[rk2] = 1;
         renderWB();
         return;
       }
