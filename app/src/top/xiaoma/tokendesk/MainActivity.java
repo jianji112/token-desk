@@ -24,14 +24,32 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class MainActivity extends Activity {
 
     private static final String HOME_URL = "file:///android_asset/index.html";
+    // 超时默认值：与历史行为一致，可由 JS 通过 httpOpts 的 optsJson 覆盖
+    static final int DEF_CONNECT_MS = 10000;
+    static final int DEF_READ_MS = 45000;
+    static final int MIN_TIMEOUT_MS = 1000;
+    static final int MAX_TIMEOUT_MS = 120000;
     WebView webView;
     final ExecutorService pool = Executors.newFixedThreadPool(4);
+    // 在途请求表：id -> 任务句柄，用于 cancel(id) 与重复下发去重
+    final Map<String, Inflight> inflight = new ConcurrentHashMap<>();
+
+    /** 一次在途 HTTP 请求的句柄：Future 用于中断等待，conn 用于真正断开 socket。 */
+    static final class Inflight {
+        volatile Future<?> future;
+        volatile boolean cancelled;
+        final AtomicReference<HttpURLConnection> conn = new AtomicReference<>();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -121,6 +139,21 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        // 页面销毁时把在途请求全部断连，避免线程阻塞到 read 超时才退出
+        for (String id : inflight.keySet()) {
+            Inflight job = inflight.remove(id);
+            if (job == null) continue;
+            job.cancelled = true;
+            Future<?> f = job.future;
+            if (f != null) f.cancel(true);
+            HttpURLConnection c = job.conn.get();
+            if (c != null) {
+                try {
+                    c.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
         pool.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("NativeBridge");
@@ -141,13 +174,45 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void http(final String id, final String method, final String url,
                          final String headersJson, final String body) {
-            host.pool.submit(() -> {
+            httpOpts(id, method, url, headersJson, body, null);
+        }
+
+        /**
+         * 带超时参数的 HTTP 桥。optsJson 形如 {"connectMs":10000,"readMs":45000}，
+         * 缺省或非法值回落 DEF_CONNECT_MS / DEF_READ_MS，并夹在 [MIN,MAX] 之间。
+         */
+        @JavascriptInterface
+        public void httpOpts(final String id, final String method, final String url,
+                             final String headersJson, final String body, final String optsJson) {
+            if (id == null || id.isEmpty()) return;
+            // 同一 id 重复下发（JS 侧超时重试）时先撤掉旧的，避免同一请求被执行两次
+            cancel(id);
+            int connectMs = DEF_CONNECT_MS;
+            int readMs = DEF_READ_MS;
+            try {
+                if (optsJson != null && optsJson.length() > 2) {
+                    JSONObject o = new JSONObject(optsJson);
+                    connectMs = clampTimeout(o.optInt("connectMs", DEF_CONNECT_MS));
+                    readMs = clampTimeout(o.optInt("readMs", DEF_READ_MS));
+                }
+            } catch (Throwable ignored) {
+                // 参数解析失败就用默认值，不阻断请求
+            }
+            final Inflight job = new Inflight();
+            final int cm = connectMs;
+            final int rm = readMs;
+            host.inflight.put(id, job);
+            Future<?> f = host.pool.submit(() -> {
+                if (job.cancelled) return;
                 String payload;
                 try {
-                    payload = doHttp(method, url, headersJson, body);
+                    payload = doHttp(method, url, headersJson, body, cm, rm, job.conn);
                 } catch (Throwable t) {
                     payload = "{\"error\":" + JSONObject.quote(String.valueOf(t.getMessage())) + "}";
                 }
+                host.inflight.remove(id, job);
+                // 已取消：不再回调 JS，避免上游重试与旧响应互相覆盖
+                if (job.cancelled) return;
                 final String js = "window.__nativeHttp && window.__nativeHttp("
                         + JSONObject.quote(id) + "," + JSONObject.quote(payload) + ")";
                 host.runOnUiThread(() -> {
@@ -156,6 +221,28 @@ public class MainActivity extends Activity {
                     }
                 });
             });
+            job.future = f;
+            // 提交与 cancel 竞态：cancel 先到时把刚拿到的 future 补撤
+            if (job.cancelled) f.cancel(true);
+        }
+
+        /** 取消在途请求：中断等待并断开 socket，返回是否命中。 */
+        @JavascriptInterface
+        public boolean cancel(String id) {
+            if (id == null || id.isEmpty()) return false;
+            Inflight job = host.inflight.remove(id);
+            if (job == null) return false;
+            job.cancelled = true;
+            Future<?> f = job.future;
+            if (f != null) f.cancel(true);
+            HttpURLConnection c = job.conn.get();
+            if (c != null) {
+                try {
+                    c.disconnect();
+                } catch (Throwable ignored) {
+                }
+            }
+            return true;
         }
 
         @JavascriptInterface
@@ -207,47 +294,70 @@ public class MainActivity extends Activity {
         }
     }
 
-    static String doHttp(String method, String url, String headersJson, String body) throws Exception {
+    static String doHttp(String method, String url, String headersJson, String body)
+            throws Exception {
+        return doHttp(method, url, headersJson, body, DEF_CONNECT_MS, DEF_READ_MS, null);
+    }
+
+    /**
+     * @param holder 传入非 null 时，会把 conn 写入其中，供 cancel(id) 断连使用
+     */
+    static String doHttp(String method, String url, String headersJson, String body,
+                         int connectMs, int readMs, AtomicReference<HttpURLConnection> holder)
+            throws Exception {
         long t0 = System.currentTimeMillis();
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method == null || method.isEmpty() ? "GET" : method.toUpperCase());
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(45000);
-        conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("Accept-Encoding", "identity");
-        conn.setRequestProperty("User-Agent", "TokenDesk/1.0 (Android)");
-        if (headersJson != null && headersJson.length() > 2) {
-            JSONObject h = new JSONObject(headersJson);
-            Iterator<String> it = h.keys();
-            while (it.hasNext()) {
-                String k = it.next();
-                String v = h.optString(k, "");
-                if (!k.isEmpty()) {
-                    conn.setRequestProperty(k, v);
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            if (holder != null) holder.set(conn);
+            conn.setRequestMethod(method == null || method.isEmpty() ? "GET" : method.toUpperCase());
+            conn.setConnectTimeout(clampTimeout(connectMs));
+            conn.setReadTimeout(clampTimeout(readMs));
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("Accept-Encoding", "identity");
+            conn.setRequestProperty("User-Agent", "TokenDesk/1.0 (Android)");
+            if (headersJson != null && headersJson.length() > 2) {
+                JSONObject h = new JSONObject(headersJson);
+                Iterator<String> it = h.keys();
+                while (it.hasNext()) {
+                    String k = it.next();
+                    String v = h.optString(k, "");
+                    if (!k.isEmpty()) {
+                        conn.setRequestProperty(k, v);
+                    }
                 }
             }
-        }
-        boolean hasBody = body != null && !body.isEmpty()
-                && !"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method);
-        if (hasBody) {
-            conn.setDoOutput(true);
-            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            conn.setFixedLengthStreamingMode(bytes.length);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(bytes);
+            boolean hasBody = body != null && !body.isEmpty()
+                    && !"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method);
+            if (hasBody) {
+                conn.setDoOutput(true);
+                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                conn.setFixedLengthStreamingMode(bytes.length);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(bytes);
+                }
             }
+
+            int status = conn.getResponseCode();
+            InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            String text = in == null ? "" : readAll(in);
+
+            JSONObject out = new JSONObject();
+            out.put("status", status);
+            out.put("body", text);
+            out.put("ms", System.currentTimeMillis() - t0);
+            return out.toString();
+        } finally {
+            if (conn != null) conn.disconnect();
         }
+    }
 
-        int status = conn.getResponseCode();
-        InputStream in = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
-        String text = in == null ? "" : readAll(in);
-        conn.disconnect();
-
-        JSONObject out = new JSONObject();
-        out.put("status", status);
-        out.put("body", text);
-        out.put("ms", System.currentTimeMillis() - t0);
-        return out.toString();
+    /** 超时夹紧：非正值或越界一律回到安全区间，避免 JS 传 0 变成"永不超时"。 */
+    static int clampTimeout(int ms) {
+        if (ms <= 0) return DEF_READ_MS;
+        if (ms < MIN_TIMEOUT_MS) return MIN_TIMEOUT_MS;
+        if (ms > MAX_TIMEOUT_MS) return MAX_TIMEOUT_MS;
+        return ms;
     }
 
     private static String readAll(InputStream in) throws Exception {
