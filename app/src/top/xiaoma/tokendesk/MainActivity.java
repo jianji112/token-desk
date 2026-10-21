@@ -95,13 +95,14 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
         s.setAllowFileAccess(true);
-        // content:// 通道对本应用无用，关掉以减少入口
-        s.setAllowContentAccess(false);
-        // file:// 资产页不得跨源读取本地/远端内容：这两个开关是 WebView 的万能后门
-        // （file:// 页面可 XHR 任意 origin、可读同目录任意文件），本应用一律走 NativeBridge，
-        // 不需要它们。关闭后浏览器内核直连通道若受影响，见 2026-10-21 实测记录。
-        s.setAllowFileAccessFromFileURLs(false);
-        s.setAllowUniversalAccessFromFileURLs(false);
+        // content:// 对本应用无用，但 file:// 页面直连远端要靠 WebView 的跨源后门，
+        // 这里保持与 GitHub v1.0.72 一致（2026-10-21 主人明确要求：浏览器内核通道必须能用）。
+        // 原因：网关 new-api 只在 OPTIONS 预检回 CORS 头，真实 GET/POST 响应没有 ACAO，
+        // 关掉下面两个开关就等于把浏览器内核通道废掉（报 Failed to fetch）。
+        // 代价：本应用页面是内置资产，不接受外部页面注入，风险面可控。
+        s.setAllowContentAccess(true);
+        s.setAllowFileAccessFromFileURLs(true);
+        s.setAllowUniversalAccessFromFileURLs(true);
         s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setSupportMultipleWindows(false);
         s.setUseWideViewPort(true);
