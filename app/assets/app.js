@@ -35,6 +35,7 @@
     range: '24h',
     maxPages: '80',
     channel: 'native',
+    shareBase: '',        // 分享给朋友用的接口地址（留空=跟随 newapiBase）
     autoRefresh: '60',
     prefetch: '1',
     accRealm: 'all',
@@ -1311,7 +1312,8 @@
     }
 
     html += '<div class="card"><div class="card-h"><div class="card-t">令牌列表<span class="n">按「' +
-      esc(RANGE_NAME[curRange] || '本期') + '」消耗排序</span></div></div>';
+      esc(RANGE_NAME[curRange] || '本期') + '」消耗排序</span></div>' +
+      '<button class="tok-b ok" data-act="tok-new">＋ 新建</button></div>';
 
     if (!S.tokens.length) html += '<div class="empty">没有令牌</div>';
 
@@ -1410,6 +1412,37 @@
     }).catch(function (e) { toast(e.message, 'err'); });
   }
 
+  // ── 分享给朋友的文案 ──────────────────────────────────────────
+  // 第一次复制某枚令牌的密钥时，剪贴板里放的是这段（带接口地址/模型），之后只放纯密钥。
+  var SHARE_MARK = 'tokendesk.tokshare.v1';
+  function shareMarked(id) {
+    try { return !!JSON.parse(localStorage.getItem(SHARE_MARK) || '{}')[id]; } catch (e) { return false; }
+  }
+  function markShared(id) {
+    try {
+      var o = {};
+      try { o = JSON.parse(localStorage.getItem(SHARE_MARK) || '{}'); } catch (e) { o = {}; }
+      o[id] = 1;
+      localStorage.setItem(SHARE_MARK, JSON.stringify(o));
+    } catch (e) { }
+  }
+  // 分享地址独立于「自己用的网关地址」：自己常用内网 IP，发给别人必须是公网域名
+  function shareBase() { return trimBase(CFG.shareBase || CFG.newapiBase); }
+  function modelLineOf(t) {
+    var ml = (t && t.raw && t.raw.model_limits_enabled) ? String(t.raw.model_limits || '').trim() : '';
+    return ml || '不限';
+  }
+  function shareTextFor(t, key, base) {
+    var b = trimBase(base || shareBase());
+    return '接口地址：' + b + '/v1\n' +
+      '密钥：sk-' + String(key || '').replace(/^sk-/, '') + '\n' +
+      '模型：' + modelLineOf(t);
+  }
+  function copyToClip(text) {
+    if (window.NativeBridge && window.NativeBridge.copy) window.NativeBridge.copy(text);
+    else if (navigator.clipboard) navigator.clipboard.writeText(text);
+  }
+
   function copyKey(id) {
     var t = findToken(id);
     if (!t) return;
@@ -1417,14 +1450,20 @@
     napiRaw('/api/token/' + t.id + '/key', 'POST', {}).then(function (d) {
       var key = d && d.key;
       if (!key) throw new Error('接口未返回密钥');
-      if (window.NativeBridge && window.NativeBridge.copy) window.NativeBridge.copy(key);
-      else if (navigator.clipboard) navigator.clipboard.writeText(key);
-      toast('密钥已复制到剪贴板', 'ok');
+      if (!shareMarked(t.id)) {
+        copyToClip(shareTextFor(t, key));
+        markShared(t.id);
+        toast('首次复制：已带上接口地址与模型', 'ok');
+      } else {
+        copyToClip('sk-' + String(key).replace(/^sk-/, ''));
+        toast('密钥已复制（sk- 开头）', 'ok');
+      }
     }).catch(function (e) { toast(e.message, 'err'); });
   }
 
-  function modelChipsHtml(current) {
+  function modelChipsHtml(current, boxId, taSel) {
     if (!S.wb || !S.wb.models) return '<div class="hint">在「模型」页签加载一次后，这里会出现可点的模型快捷块</div>';
+    var box = boxId || 'sh-models-chips';
     var picked = String(current || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
     var groups = [['cn', '国内版'], ['intl', '国际版']];
     var html = '';
@@ -1440,7 +1479,140 @@
       });
       html += '</div>';
     });
-    return html ? '<div id="sh-models-chips">' + html + '</div>' : '';
+    return html ? '<div id="' + box + '">' + html + '</div>' : '';
+  }
+
+  // 快捷块 → 文本框：点击在「逗号分隔」的白名单里增删一项
+  function bindModelChips(boxSel, taSel) {
+    var box = $(boxSel);
+    if (!box) return;
+    box.onclick = function (e) {
+      var b = e.target.closest('.chip');
+      if (!b) return;
+      var m = b.getAttribute('data-model');
+      var ta = $(taSel);
+      var arr = String(ta.value || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      var i = arr.indexOf(m);
+      if (i >= 0) { arr.splice(i, 1); b.classList.remove('on'); }
+      else { arr.push(m); b.classList.add('on'); }
+      ta.value = arr.join(',');
+    };
+  }
+
+  // ── 新建令牌 ──────────────────────────────────────────────────
+  // NewAPI 建令牌只回 {"success":true}（不返回 id），必须重拉列表按「名字 + 最新 created_time」找回，
+  // 再 POST /api/token/<id>/key 拿密钥。这两步都实测过（0.1.x rc.45）。
+  function createToken(name, opt) {
+    var body = {
+      name: name,
+      remain_quota: opt.unlimited ? 0 : num(opt.quota),
+      expired_time: num(opt.expired),
+      unlimited_quota: !!opt.unlimited,
+      model_limits_enabled: !!(opt.models && opt.models.length),
+      model_limits: (opt.models || []).join(','),
+      allow_ips: '',
+      group: ''
+    };
+    toast('创建中…');
+    return napiRaw('/api/token/', 'POST', body).then(function () {
+      return loadOverview(true);
+    }).then(function () {
+      var t = null;
+      (S.tokens || []).forEach(function (x) {
+        if (x.name !== name) return;
+        if (!t || num(x.raw.created_time) > num(t.raw.created_time)) t = x;
+      });
+      if (!t) throw new Error('已创建，但列表里没找到「' + name + '」，点右上角刷新一次');
+      return napiRaw('/api/token/' + t.id + '/key', 'POST', {}).then(function (d) {
+        if (!d || !d.key) throw new Error('已创建，但接口没返回密钥');
+        return { t: t, key: d.key };
+      });
+    }).then(function (r) {
+      hideSheet();
+      openShareSheet(r.t, r.key);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  }
+
+  function newTokenSheet() {
+    var html = '<div class="sheet-body">' +
+      '<div class="sheet-title">新建令牌</div>' +
+      '<div class="field"><label>名称</label><input id="nt-name" type="text" placeholder="给谁用就写谁"></div>' +
+      '<div class="switch" style="margin-top:12px"><div><div class="lab">无限额度</div></div>' +
+      '<div class="tgl" id="nt-unlimited"></div></div>' +
+      '<div class="field" style="margin-top:14px"><label>额度（500000 ≈ $1）</label>' +
+      '<input id="nt-quota" type="number" inputmode="numeric" value="500000"></div>' +
+      '<div class="field"><label>过期时间</label><input id="nt-expired" type="text" value="-1" placeholder="-1 永不过期 / 2026-12-31"></div>' +
+      '<div class="field"><label>模型白名单（留空=不限）</label><textarea id="nt-models" placeholder="cn:deepseek-v4.1-flash"></textarea>' +
+      modelChipsHtml('', 'nt-models-chips', '#nt-models') + '</div>' +
+      '<div class="sheet-acts"><button class="btn ghost" data-sheet="close">取消</button>' +
+      '<button class="btn ok" data-sheet="create">创建</button></div></div>';
+    showSheet(html);
+    bindModelChips('#nt-models-chips', '#nt-models');
+
+    var unlimitedEl = $('#nt-unlimited');
+    unlimitedEl.onclick = function () {
+      unlimitedEl.classList.toggle('on');
+      $('#nt-quota').disabled = unlimitedEl.classList.contains('on');
+    };
+
+    $('[data-sheet="close"]').onclick = hideSheet;
+    $('[data-sheet="create"]').onclick = function () {
+      var name = String($('#nt-name').value || '').trim();
+      if (!name) { toast('先填个名字', 'err'); return; }
+      var unlimited = unlimitedEl.classList.contains('on');
+      var quota = String($('#nt-quota').value || '').trim();
+      if (!unlimited && (quota === '' || isNaN(parseInt(quota, 10)) || parseInt(quota, 10) < 0)) {
+        toast('额度要填 0 或正整数（或用「无限额度」）', 'err'); return;
+      }
+      var exp = parseExpired(String($('#nt-expired').value || '').trim());
+      if (exp === null) { toast('过期时间填 -1 或 YYYY-MM-DD', 'err'); return; }
+      var models = String($('#nt-models').value || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+      createToken(name, { unlimited: unlimited, quota: quota, expired: exp, models: models });
+    };
+  }
+
+  // 表单里的日期 → 秒；-1/留空 = 永不过期，非法返回 null
+  function parseExpired(v) {
+    var s = String(v || '').trim();
+    if (!s || s === '-1') return -1;
+    if (/^\d+$/.test(s)) return num(s);
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return null;
+    var d = new Date(num(m[1]), num(m[2]) - 1, num(m[3]), 23, 59, 59);
+    var t = Math.floor(d.getTime() / 1000);
+    return isFinite(t) ? t : null;
+  }
+
+  // 建完/首次复制时的分享面板：地址可改（自己用内网、给别人用公网域名），文案可改
+  function openShareSheet(t, key) {
+    var html = '<div class="sheet-body">' +
+      '<div class="sheet-title">' + pv(t.name) + ' · 分享</div>' +
+      '<div class="field"><label>接口地址</label><input id="shs-base" type="url" value="' + esc(shareBase()) + '"></div>' +
+      '<div class="field"><label>文案</label><textarea id="shs-text" style="min-height:84px"></textarea></div>' +
+      '<div class="sheet-acts">' +
+      '<button class="btn ghost" data-sheet="rawkey">只复制 Key</button>' +
+      '<button class="btn ok" data-sheet="copy">复制文案</button></div></div>';
+    showSheet(html);
+
+    function paint() { $('#shs-text').value = shareTextFor(t, key, $('#shs-base').value); }
+    paint();
+    $('#shs-base').oninput = paint;
+    $('#shs-base').onchange = function () {
+      CFG.shareBase = trimBase($('#shs-base').value);
+      saveCfg();
+      paint();
+    };
+    $('[data-sheet="rawkey"]').onclick = function () {
+      copyToClip('sk-' + String(key).replace(/^sk-/, ''));
+      markShared(t.id);
+      toast('已复制密钥（sk- 开头）', 'ok');
+    };
+    $('[data-sheet="copy"]').onclick = function () {
+      copyToClip($('#shs-text').value);
+      markShared(t.id);
+      hideSheet();
+      toast('分享文案已复制', 'ok');
+    };
   }
 
   function openTokenSheet(id) {
@@ -1469,20 +1641,7 @@
 
     showSheet(html);
 
-    var chips = $('#sh-models-chips');
-    if (chips) {
-      chips.onclick = function (e) {
-        var b = e.target.closest('.chip');
-        if (!b) return;
-        var m = b.getAttribute('data-model');
-        var ta = $('#sh-models');
-        var arr = String(ta.value || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
-        var i = arr.indexOf(m);
-        if (i >= 0) { arr.splice(i, 1); b.classList.remove('on'); }
-        else { arr.push(m); b.classList.add('on'); }
-        ta.value = arr.join(',');
-      };
-    }
+    bindModelChips('#sh-models-chips', '#sh-models');
 
     var unlimitedEl = $('#sh-unlimited');
     unlimitedEl.onclick = function () {
@@ -3036,6 +3195,7 @@
       if (act === 'toggle') toggleToken(id);
       else if (act === 'edit') openTokenSheet(id);
       else if (act === 'key') copyKey(id);
+      else if (act === 'tok-new') newTokenSheet();
     });
 
     document.addEventListener('click', function (e) {

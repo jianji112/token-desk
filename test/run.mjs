@@ -1619,6 +1619,126 @@ const fixtures = [
   },
 
   {
+    id: 'F26',
+    name: '新建令牌 + 首次复制带域名：POST 建 → 找回 id → 取 key → 分享面板；之后只复制密钥',
+    // 契约（rc.45 实测）：POST /api/token/ 只回 {"success":true}，不返回 id；
+    // 必须重拉列表按「名字 + 最新 created_time」找回 id，再 POST /api/token/<id>/key 拿密钥。
+    cfg: (port) => baseCfg(port, { channel: 'browser', newapiBase: 'https://gw.example.xyz:16666' }),
+    preSeed: `
+      window.__CALLS = [];
+      window.__COPIED = [];
+      try {
+        Object.defineProperty(navigator, 'clipboard', {
+          value: { writeText: function (t) { window.__COPIED.push(t); return Promise.resolve(); } }
+        });
+      } catch (e) {}
+      (function () {
+        var TOK = { id: 99, name: '小明', status: 1, created_time: Math.floor(Date.now() / 1000),
+                    expired_time: -1, remain_quota: 500000, unlimited_quota: false,
+                    model_limits_enabled: true, model_limits: 'cn:deepseek-v4.1-flash',
+                    used_quota: 0, accessed_time: 0 };
+        function J(o) {
+          return Promise.resolve({ ok: true, status: 200,
+            text: function () { return Promise.resolve(JSON.stringify(o)); } });
+        }
+        var real = window.fetch;
+        window.fetch = function (u, o) {
+          var s = String(u), m = (o && o.method) || 'GET';
+          if (s.indexOf('/api/token') < 0 && s.indexOf('/api/status') < 0) return real.call(window, u, o);
+          window.__CALLS.push(m + ' ' + s);
+          var path = s.split('?')[0];
+          if (/\\/key$/.test(path)) return J({ success: true, data: { key: 'ABC123' } });
+          if (path.indexOf('/api/status') >= 0) return J({ data: { quota_per_unit: 500000 } });
+          if (/\\/api\\/token\\/?$/.test(path)) {
+            if (m === 'POST') {
+              var body = {};
+              try { body = JSON.parse((o && o.body) || '{}'); } catch (e) {}
+              window.__CREATED = body;
+              return J({ success: true });
+            }
+            return J({ data: { page: 1, page_size: 100, total: 1, items: [TOK] } });
+          }
+          return J({ data: {} });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      function sheetText() {
+        var el = document.querySelector('#sheet textarea#shs-text');
+        return el ? el.value : null;
+      }
+      __app.showTab('tokens');
+      var newBtn = document.querySelector('[data-act="tok-new"]');
+      var hasBtn = !!newBtn;
+      if (newBtn) newBtn.click();
+      var nameEl = document.getElementById('nt-name');
+      var hasForm = !!nameEl;
+      if (nameEl) nameEl.value = '小明';
+      var models = document.getElementById('nt-models');
+      if (models) models.value = 'cn:deepseek-v4.1-flash';
+      var createBtn = document.querySelector('[data-sheet="create"]');
+      if (createBtn) createBtn.click();
+      await new Promise(function (r) { setTimeout(r, 900); });
+
+      var txt1 = sheetText();
+      var body1 = window.__CREATED || null;
+      var calls = window.__CALLS.slice();
+
+      // 分享面板里改地址 → 文案跟着变、且写回配置
+      var baseEl = document.getElementById('shs-base');
+      var base0 = baseEl ? baseEl.value : null;
+      if (baseEl) { baseEl.value = 'https://other.example.xyz'; if (baseEl.onchange) baseEl.onchange(); }
+      var txt2 = sheetText();
+
+      var copyBtn = document.querySelector('[data-sheet="copy"]');
+      if (copyBtn) copyBtn.click();
+      var copied1 = window.__COPIED.slice();
+
+      // 之后从列表再复制 → 只给纯密钥（首次标记已写）
+      __app.showTab('tokens');
+      var keyBtn = document.querySelector('[data-act="key"]');
+      if (keyBtn) keyBtn.click();
+      await new Promise(function (r) { setTimeout(r, 500); });
+      var copied2 = window.__COPIED.slice();
+
+      // 清掉标记 → 该令牌的下一次复制又回到分享文案（按令牌计「第一次」）
+      try { localStorage.removeItem('tokendesk.tokshare.v1'); } catch (e) {}
+      __app.showTab('tokens');
+      var keyBtn2 = document.querySelector('[data-act="key"]');
+      if (keyBtn2) keyBtn2.click();
+      await new Promise(function (r) { setTimeout(r, 500); });
+      var copied3 = window.__COPIED.slice();
+
+      return { hasBtn: hasBtn, hasForm: hasForm, txt1: txt1, body1: body1, calls: calls,
+               base0: base0, txt2: txt2, copied1: copied1, copied2: copied2, copied3: copied3,
+               shareBase: __app.cfg().shareBase };
+    })()`,
+    check(out) {
+      var t1 = String(out.txt1 || ''), t2 = String(out.txt2 || '');
+      var b = out.body1 || {};
+      return [
+        eq('令牌页必须有「＋ 新建」按钮', out.hasBtn, true),
+        eq('点开必须是新建表单', out.hasForm, true),
+        eq('建令牌必须 POST /api/token/', out.calls.some(function (c) { return c.indexOf('POST') === 0 && /\/api\/token\/?$/.test(c.split(' ')[1].split('?')[0]); }), true),
+        eq('body 必带名字', b.name, '小明'),
+        eq('body 必带额度（非无限时用表单值）', b.remain_quota, 500000),
+        eq('body 必带 unlimited_quota', b.unlimited_quota, false),
+        eq('body 必带模型白名单开关与内容', b.model_limits_enabled === true && b.model_limits === 'cn:deepseek-v4.1-flash', true),
+        eq('body 必带过期时间（-1=永不过期）', b.expired_time, -1),
+        eq('创建后必须按名字回查列表拿 id 并取 key', out.calls.some(function (c) { return /\/api\/token\/99\/key$/.test(c); }), true),
+        eq('分享文案默认用网关地址 + /v1', t1.indexOf('https://gw.example.xyz:16666/v1') >= 0, true),
+        eq('分享文案的密钥必须带 sk- 前缀', t1.indexOf('sk-ABC123') >= 0, true),
+        eq('分享文案必须写明模型', t1.indexOf('cn:deepseek-v4.1-flash') >= 0, true),
+        eq('改分享地址后文案跟着换', t2.indexOf('https://other.example.xyz/v1') >= 0, true),
+        eq('分享地址要写回配置（下次不用重填）', out.shareBase, 'https://other.example.xyz'),
+        eq('复制文案 = 完整分享文案', String(out.copied1[0] || '').indexOf('接口地址：') >= 0, true),
+        eq('之后复制只给纯密钥（sk- 开头、无接口地址）', out.copied2[out.copied2.length - 1], 'sk-ABC123'),
+        eq('清掉标记后该令牌再复制又给分享文案', String(out.copied3[out.copied3.length - 1] || '').indexOf('接口地址：') >= 0, true),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
