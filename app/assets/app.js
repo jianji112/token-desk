@@ -1773,7 +1773,7 @@
     var html = '<div class="sheet-body">' +
       '<div class="sheet-title">' + pv(t.name) + ' · 分享</div>' +
       '<div class="field"><label>接口地址</label><input id="shs-base" type="url" value="' + esc(shareBase()) + '"></div>' +
-      '<div class="field"><label>文案</label><textarea id="shs-text" style="min-height:84px"></textarea></div>' +
+      '<div class="field"><label>文案</label><textarea id="shs-text" style="min-height:118px"></textarea></div>' +
       '<div class="sheet-acts">' +
       '<button class="btn ghost" data-sheet="rawkey">只复制 Key</button>' +
       '<button class="btn ok" data-sheet="copy">复制文案</button></div></div>';
