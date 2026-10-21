@@ -20,6 +20,9 @@ PLACEHOLDERS = {
     "__PRESET_PUBLIC_HUB__": "TD_PRESET_PUBLIC_HUB",
     "__PRESET_LAN_NEWAPI__": "TD_PRESET_LAN_NEWAPI",
     "__PRESET_LAN_HUB__": "TD_PRESET_LAN_HUB",
+    # 分享给朋友的接口地址（公网域名）。和「自己用的网关地址」分开：
+    # 自己常填内网 IP，朋友必须用公网入口；这里注入，公开源码里不出现任何真实域名。
+    "__PRESET_SHARE_BASE__": "TD_PRESET_SHARE_BASE",
 }
 
 # 残留检测：允许中间带非 ASCII 字符（占位符名字曾漂移成 __PRESET_PUBLIC_账号池__ 而漏检）；

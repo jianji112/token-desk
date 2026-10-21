@@ -116,6 +116,17 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$DIST"
 
+# 预设地址可以从私有 .env 读（公开仓里不出现任何真实域名/IP）：
+# 环境变量优先，其次 ENVFILE 里的同名键。私有区 build.sh 会把 TD_ENV_FILE 指到 private/.env。
+if [ -f "$ENVFILE" ]; then
+  for _k in TD_PRESET_PUBLIC_NEWAPI TD_PRESET_PUBLIC_HUB TD_PRESET_LAN_NEWAPI TD_PRESET_LAN_HUB TD_PRESET_SHARE_BASE; do
+    if [ -z "$(printenv "$_k" || true)" ]; then
+      _v="$( { grep -E "^$_k=" "$ENVFILE" | tail -1 | cut -d= -f2-; } || true )"
+      [ -n "$_v" ] && export "$_k=$_v"
+    fi
+  done
+fi
+
 python3 "$ROOT/tools/inject-presets.py" "$ASSETS_SRC" "$ASSETS_DIR"
 
 echo "[1/6] 编译资源"

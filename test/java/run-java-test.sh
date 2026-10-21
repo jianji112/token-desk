@@ -11,6 +11,9 @@ mkdir -p "$OUT"
 javac --release 8 -Xlint:-options -d "$OUT" \
   test/java/org/json/JSONObject.java \
   test/java/top/xiaoma/tokendesk/F7cJavaTest.java \
-  app/src/top/xiaoma/tokendesk/HttpJobRegistry.java
+  test/java/top/xiaoma/tokendesk/ApkDownloadTest.java \
+  app/src/top/xiaoma/tokendesk/HttpJobRegistry.java \
+  app/src/top/xiaoma/tokendesk/ApkDownload.java
 
 java -cp "$OUT" top.xiaoma.tokendesk.F7cJavaTest
+java -cp "$OUT" top.xiaoma.tokendesk.ApkDownloadTest

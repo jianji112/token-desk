@@ -1739,6 +1739,268 @@ const fixtures = [
   },
 
   {
+    id: 'F27',
+    name: '统计偏好改了立刻生效并存盘：自动刷新重排定时器、范围/翻页/预取不等「保存并连接」',
+    // 原实现只在 saveAndGo 的 collect() 里读这四项，用户改完不点「保存并连接」= 什么都不发生；
+    // 切页签回来又被 renderSettings 的旧 CFG 覆盖 —— 主人报的「改了不保存、没生效」就是这个。
+    cfg: (port) => baseCfg(port, { channel: 'native', autoRefresh: '60', prefetch: '1' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      function store() {
+        try { return JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) { return {}; }
+      }
+      function fire(el) { el.dispatchEvent(new Event('change', { bubbles: true })); }
+      function sel(v) {
+        var s = document.getElementById('f-auto');
+        s.value = v; fire(s);
+      }
+      __app.showTab('settings');
+      var a0 = __app.autoState();
+
+      sel('30');
+      var a1 = __app.autoState(), s1 = store();
+
+      sel('0');
+      var a2 = __app.autoState(), s2 = store();
+
+      // 重新渲染（等价于切页签回来）：select 必须显示刚存的值，不能被旧 CFG 顶回去
+      sel('300');
+      __app.showTab('overview');
+      __app.showTab('settings');
+      var autoEl = document.getElementById('f-auto');
+      var shown = autoEl ? autoEl.value : null;
+
+      // 其余三项同样要「即时存」
+      var r = document.getElementById('f-range'); r.value = '7d'; fire(r);
+      var mp = document.getElementById('f-maxpages'); mp.value = '123'; fire(mp);
+      var pf = document.getElementById('f-prefetch'); pf.value = '0'; fire(pf);
+      var s3 = store();
+
+      return { a0: a0, a1: a1, s1: s1, a2: a2, s2: s2, shown: shown, a3: __app.autoState(),
+               s3: s3, range: __app.cfg().range, maxPages: __app.cfg().maxPages, prefetch: __app.cfg().prefetch };
+    })()`,
+    check(out) {
+      return [
+        eq('起手配置是每分钟一次', out.a0.sec, 60),
+        eq('改成 30 秒 → 立即生效（定时器已重排）', out.a1.on === true && out.a1.sec === 30, true),
+        eq('改成 30 秒 → 立刻写进 localStorage（不等保存按钮）', out.s1.autoRefresh, '30'),
+        eq('改成关闭 → 定时器真的停掉', out.a2.on, false),
+        eq('改成关闭 → 盘上也是 0', out.s2.autoRefresh, '0'),
+        eq('重新渲染后下拉框显示的是刚存的值（不被旧 CFG 覆盖）', out.shown, '300'),
+        eq('切页签回来定时器仍按 300 秒在跑', out.a3.on === true && out.a3.sec === 300, true),
+        eq('默认范围即时落盘', out.s3.range, '7d'),
+        eq('最大翻页数即时落盘', String(out.s3.maxPages), '123'),
+        eq('后台预取即时落盘', String(out.s3.prefetch), '0'),
+        eq('内存里的 CFG 与盘上一致', [out.range, out.maxPages, out.prefetch].join('|'), '7d|123|0'),
+      ];
+    },
+  },
+
+  {
+    id: 'F28',
+    name: '令牌列表：搜索只重画列表（不丢焦点）、状态筛选、四种排序、累计用紧凑单位',
+    cfg: (port) => baseCfg(port, { channel: 'browser' }),
+    preSeed: `
+      window.__COPIED = [];
+      (function () {
+        var TOKS = [
+          { id: 1, name: '何薛宝', status: 1, created_time: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '', used_quota: 60985055487, accessed_time: 300 },
+          { id: 2, name: 'Hermes', status: 2, created_time: 2, expired_time: 9999999999, remain_quota: 500000, unlimited_quota: false, model_limits_enabled: false, model_limits: '', used_quota: 1000000, accessed_time: 100 },
+          { id: 3, name: '工作号', status: 1, created_time: 3, expired_time: 9999999999, remain_quota: 900000, unlimited_quota: false, model_limits_enabled: false, model_limits: '', used_quota: 2000000, accessed_time: 200 }
+        ];
+        function J(o) { return Promise.resolve({ ok: true, status: 200, text: function () { return Promise.resolve(JSON.stringify(o)); } }); }
+        var real = window.fetch;
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('/api/token') < 0 && s.indexOf('/api/status') < 0) return real.call(window, u, o);
+          if (s.indexOf('/api/status') >= 0) return J({ data: {} });
+          return J({ data: { page: 1, page_size: 100, total: TOKS.length, items: TOKS } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      await __app.loadOverview(true);
+      __app.showTab('tokens');
+      function names() {
+        var box = document.getElementById('tok-list');
+        return box ? Array.prototype.map.call(box.querySelectorAll('.tok .tok-name'), function (e) { return e.textContent; }) : [];
+      }
+      function fire(el) { el.dispatchEvent(new Event('change', { bubbles: true })); }
+      var n0 = names();
+      var acc0 = document.querySelector('#tok-list .tok-line').textContent;
+
+      // 搜索：只重画列表，输入框还在、值还在
+      var q = document.getElementById('tok-q');
+      q.focus();                       // 真实用户先点进输入框；不聚焦就测不出「重画是否丢焦点」
+      q.value = 'her';
+      if (q.oninput) q.oninput();
+      await new Promise(function (r) { setTimeout(r, 220); });
+      var nSearch = names();
+      var qAlive = !!document.getElementById('tok-q') && document.getElementById('tok-q').value === 'her';
+      var focusKept = document.activeElement === q;
+
+      // 清空搜索 → 全部回来
+      q.value = ''; if (q.oninput) q.oninput();
+      await new Promise(function (r) { setTimeout(r, 220); });
+      var nAll = names();
+
+      // 状态筛选
+      var offBtn = document.querySelector('[data-act="tok-filter"][data-f="off"]');
+      if (offBtn) offBtn.click();
+      var nOff = names();
+      var allBtn = document.querySelector('[data-act="tok-filter"][data-f="all"]');
+      if (allBtn) allBtn.click();
+
+      // 排序：按名称
+      var sortEl = document.getElementById('tok-sort');
+      sortEl.value = 'name'; if (sortEl.onchange) sortEl.onchange();
+      var nByName = names();
+      // 按剩余（无限额度排最前）
+      sortEl.value = 'quota'; if (sortEl.onchange) sortEl.onchange();
+      var nByQuota = names();
+
+      return { n0: n0, acc0: acc0, nSearch: nSearch, qAlive: qAlive, hasFocus: focusKept,
+               nAll: nAll, nOff: nOff, nByName: nByName, nByQuota: nByQuota,
+               filter: __app.cfg().tokFilter, sort: __app.cfg().tokSort };
+    })()`,
+    check(out) {
+      return [
+        eq('默认按消耗排序（何薛宝 used 最大在最前）', out.n0[0], '何薛宝'),
+        eq('累计金额用紧凑单位（带「万」，不再是 121,970 这种长串）', out.acc0.indexOf('万') >= 0, true),
+        eq('搜索 her 只留 Hermes（大小写不敏感）', out.nSearch.join(','), 'Hermes'),
+        eq('搜索后输入框还在且值没被清（不是整页重画）', out.qAlive, true),
+        eq('搜索后焦点仍在输入框', out.hasFocus, true),
+        eq('清空搜索 → 3 条全回来', out.nAll.length, 3),
+        eq('筛「停用」只剩 Hermes', out.nOff.join(','), 'Hermes'),
+        eq('按名称排序：拼音序（工作号 → 何薛宝 → Hermes）', out.nByName.join(','), '工作号,何薛宝,Hermes'),
+        eq('按剩余排序：无限额度排最前（何薛宝）', out.nByQuota[0], '何薛宝'),
+        eq('筛选状态写回配置', out.filter, 'all'),
+        eq('排序方式写回配置', out.sort, 'quota'),
+      ];
+    },
+  },
+
+  {
+    id: 'F29',
+    name: '日志仓迁 IndexedDB：配额写满不砍行（不再制造「覆盖倒退」）、重启能从 IDB 接管回来',
+    // 老实现：localStorage 写失败 → 把 rows 砍到 12000/8000/4000，界面只标 capped，用户看不出被砍。
+    // 现在：IDB 存全量；localStorage 只是兼容镜像；两边都失败才降级，并把 degraded 暴露出来。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      function sleep2(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+      // 25 行足够证明「没被砍」：老的降级阈值是 4000，这里换一种更硬的验证——
+      // 直接把 localStorage.setItem 换成抛 QuotaExceeded（模拟配额满），行数必须原样保留。
+      var rows = [];
+      for (var i = 0; i < 25; i++) rows.push(__T.row(1761000000 - i * 10, i + 1, 5, 'k5', 'gpt-4o', 10, 10, 100));
+      __T.seedRaw(rows, { at: 1761000000 * 1000, since: 1761000000 - 300, newest: 1761000000, pages: 1, complete: true });
+      var before = __app.raw();
+
+      var realSet = localStorage.setItem.bind(localStorage);
+      var quotaMode = false;
+      localStorage.setItem = function (k, v) {
+        if (quotaMode && k === __app.rawKey()) { var e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e; }
+        return realSet(k, v);
+      };
+      quotaMode = true;
+      __app.meta();                       // rawMeta + rawSave(true)：配额满的情况下存盘
+      await sleep2(120);
+      var afterQuota = __app.raw();
+
+      // 从 IDB 再把仓接回来：先抹内存 + 删 localStorage 镜像，模拟「重启后本地镜像被清」
+      quotaMode = false;
+      __app.rawDropMem();
+      try { localStorage.removeItem(__app.rawKey()); } catch (e) {}
+      var adopted = await __app.rawAdopt();
+      var afterAdopt = __app.raw();
+
+      return { before: before, afterQuota: afterQuota, adopted: adopted, afterAdopt: afterAdopt };
+    })()`,
+    check(out) {
+      return [
+        eq('起手 25 行', out.before.rows, 25),
+        eq('配额满时不砍行（行数仍是 25，老实现会砍到 4000 以下）', out.afterQuota.rows, 25),
+        eq('配额满时标记 degraded（界面会显示「仅内存」）', out.afterQuota.degraded, true),
+        eq('IDB 可用（idb=true）', out.afterQuota.idb, true),
+        eq('重启后能从 IDB 接管回来', out.adopted, true),
+        eq('接管回来的行数一致', out.afterAdopt.rows, 25),
+        eq('接管后不再是 degraded', out.afterAdopt.degraded, false),
+      ];
+    },
+  },
+
+  {
+    id: 'F30',
+    name: '更新一键下载：有原生桥才露「下载并安装」，下载的是 APK 附件直链；回调驱动提示',
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `
+      window.__DL = [];
+      window.NativeBridge = {
+        appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); },
+        copy: function (t) { window.__COPIED = t; },
+        downloadApk: function (u, v) { window.__DL.push({ url: u, ver: v }); }
+      };
+      (function () {
+        var real = window.fetch;
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('api.github.com') < 0 && s.indexOf('example.invalid') < 0) return real.call(window, u, o);
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({
+              tag_name: 'v1.0.73',
+              html_url: 'https://example.invalid/releases/tag/v1.0.73',
+              assets: [
+                { name: 'notes.txt', browser_download_url: 'https://example.invalid/notes.txt' },
+                { name: 'TokenDesk-1.0.73.apk', browser_download_url: 'https://example.invalid/dl/TokenDesk-1.0.73.apk' }
+              ],
+              body: 'x'
+            });
+          } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.showTab('settings');
+      await __app.checkUpdate({ force: true, cur: '1.0.72', urls: ['https://example.invalid/releases/latest'] });
+      var dlBtn = document.getElementById('f-upddl');
+      var cpBtn = document.getElementById('f-updcopy');
+      var shown = dlBtn ? dlBtn.style.display !== 'none' : null;
+      var note0 = document.getElementById('upd-note');
+      if (dlBtn) dlBtn.click();                     // 点「下载并安装」
+      var calls = window.__DL.slice();
+      var noteBusy = document.getElementById('upd-note');
+      window.__onApk({ ok: true, msg: '下载完成（116 KB），准备安装', file: 'TokenDesk-1.0.73.apk' });
+      var note1 = document.getElementById('upd-note').textContent;   // 立刻取值：元素会被下一次回调改写
+      window.__onApk({ ok: false, msg: '下载失败：HTTP 404' });
+      var note2 = document.getElementById('upd-note').textContent;
+      // 网页版：没有桥 → 下载按钮必须藏着，只能复制
+      delete window.NativeBridge;
+      __app.showTab('overview'); __app.showTab('settings');
+      var dlBtn2 = document.getElementById('f-upddl');
+      return {
+        shown: shown, hasCopy: !!cpBtn && cpBtn.style.display !== 'none',
+        calls: calls, noteBusy: noteBusy ? noteBusy.textContent : null,
+        note1: note1, note2: note2,
+        webShown: dlBtn2 ? dlBtn2.style.display !== 'none' : null
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('壳内发现新版 → 露「下载并安装」', out.shown, true),
+        eq('同时保留「复制地址」', out.hasCopy, true),
+        eq('点下载只调用一次原生桥', out.calls.length, 1),
+        eq('下载的是 APK 附件直链（不是 release 页面，也不是 notes.txt）', out.calls[0].url, 'https://example.invalid/dl/TokenDesk-1.0.73.apk'),
+        eq('版本号一并交给原生侧（文件名用得上）', out.calls[0].ver, '1.0.73'),
+        eq('成功回调后提示下载完成', String(out.note1 || '').indexOf('下载完成') >= 0, true),
+        eq('失败回调后提示真实原因', String(out.note2 || '').indexOf('HTTP 404') >= 0, true),
+        eq('网页版（无桥）不许露下载按钮', out.webShown, false),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),

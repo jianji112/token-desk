@@ -4,9 +4,12 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
@@ -18,6 +21,7 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -310,6 +314,12 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void downloadApk(final String url, final String ver) {
+            if (!allowed()) return;
+            host.startApkDownload(url, ver);
+        }
+
+        @JavascriptInterface
         public void finishApp() {
             if (!allowed()) return;
             host.runOnUiThread(host::finish);
@@ -333,6 +343,64 @@ public class MainActivity extends Activity {
     static String doHttp(String method, String url, String headersJson, String body)
             throws Exception {
         return doHttp(method, url, headersJson, body, DEF_CONNECT_MS, DEF_READ_MS, null);
+    }
+
+    // ── 应用内更新：下载 APK 并拉起系统安装器 ──────────────────────────────
+    // 只在用户明确点「下载并安装」时走（不自动下载）。JS 通过 window.__onApk(json) 收到结果。
+    void startApkDownload(final String url, final String ver) {
+        if (url == null || !url.startsWith("https://")) {
+            apkCallback(false, "只支持 https 下载地址", null);
+            return;
+        }
+        apkCallback(true, "开始下载…", null);
+        new Thread(() -> {
+            File dir = ApkProvider.dirOf(this);
+            File dest = new File(dir, ApkDownload.safeName("TokenDesk-" + (ver == null ? "" : ver) + ".apk"));
+            try {
+                long bytes = ApkDownload.fetch(url, dest, 15000, 120000);
+                apkCallback(true, "下载完成（" + (bytes / 1024) + " KB），准备安装", dest.getName());
+                runOnUiThread(() -> installApk(dest));
+            } catch (Throwable e) {
+                String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                apkCallback(false, "下载失败：" + msg, null);
+            }
+        }, "apk-dl").start();
+    }
+
+    private void installApk(File apk) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !getPackageManager().canRequestPackageInstalls()) {
+            // 安卓 8+ 要「允许安装未知应用」逐应用授权，跳过去让用户点一下
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+                Toast.makeText(this, "请允许本应用安装应用，然后回到 App 再点一次", Toast.LENGTH_LONG).show();
+            } catch (Throwable ignored) {
+                Toast.makeText(this, "请到系统设置允许安装未知应用", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        try {
+            Uri uri = ApkProvider.uriFor(this, apk);
+            Intent i = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable e) {
+            Toast.makeText(this, "拉起安装器失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void apkCallback(boolean ok, String msg, String file) {
+        if (webView == null) return;
+        final String js = "window.__onApk&&window.__onApk({ok:" + ok
+                + ",msg:" + JSONObject.quote(msg == null ? "" : msg)
+                + ",file:" + JSONObject.quote(file == null ? "" : file) + "})";
+        runOnUiThread(() -> {
+            try {
+                webView.evaluateJavascript(js, null);
+            } catch (Throwable ignored) {
+            }
+        });
     }
 
     /**

@@ -35,7 +35,10 @@
     range: '24h',
     maxPages: '80',
     channel: 'native',
-    shareBase: '',        // 分享给朋友用的接口地址（留空=跟随 newapiBase）
+    shareBase: '',        // 分享给朋友用的接口地址（留空=跟随构建期预设或 newapiBase）
+    tokQuery: '',         // 令牌列表搜索词
+    tokFilter: 'all',     // all|on|off|exp
+    tokSort: 'usage',     // usage|quota|recent|name
     autoRefresh: '60',
     prefetch: '1',
     accRealm: 'all',
@@ -140,6 +143,100 @@
   // 直接弃用旧键（只是本地缓存，下次扫描自愈）；旧键必须 remove，否则白占 5–10MB 配额
   var RAW_KEY = 'tokendesk.rawlog.v3';
   var RAW_KEY_LEGACY = 'tokendesk.rawlog.v2';
+
+  // ── 日志仓持久层（IndexedDB 主存 + localStorage 兼容镜像）────────────────
+  // localStorage 单源配额通常只有 5–10MB，40000 行整行 JSON 约 7MB —— 必撞墙。
+  // 老实现撞墙时把 rows 砍到 12000/8000/4000，表现成「覆盖区间倒退」，界面还只标 capped。
+  // 现在：IndexedDB 存全量，localStorage 只当兼容镜像（测试与老路径仍读它）；
+  // 两边都写不进去才降级截断，并把 degraded 暴露给 __app.raw()。
+  var IDB_NAME = 'tokendesk';
+  var IDB_STORE = 'kv';
+  var IDB_KEY = 'rawlog.v3';
+  var idbPromise = null;
+  var idbOK = null;        // null=未知 / true / false
+  var rawDegraded = false; // 全量只在内存（两个持久层都失败）
+
+  function idbOpen() {
+    if (idbPromise) return idbPromise;
+    idbPromise = new Promise(function (resolve) {
+      try {
+        if (typeof indexedDB === 'undefined' || !indexedDB) return resolve(null);
+        var req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function () {
+          var db = req.result;
+          if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+        };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { resolve(null); };
+        req.onblocked = function () { resolve(null); };
+      } catch (e) { resolve(null); }
+    });
+    return idbPromise;
+  }
+
+  function idbSet(json) {
+    return idbOpen().then(function (db) {
+      if (!db) { idbOK = false; return false; }
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).put(json, IDB_KEY);
+          tx.oncomplete = function () { idbOK = true; resolve(true); };
+          tx.onerror = function () { idbOK = false; resolve(false); };
+          tx.onabort = function () { idbOK = false; resolve(false); };
+        } catch (e) { idbOK = false; resolve(false); }
+      });
+    }, function () { idbOK = false; return false; });
+  }
+
+  function idbGet() {
+    return idbOpen().then(function (db) {
+      if (!db) return null;
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(IDB_STORE, 'readonly');
+          var rq = tx.objectStore(IDB_STORE).get(IDB_KEY);
+          rq.onsuccess = function () { resolve(rq.result || null); };
+          rq.onerror = function () { resolve(null); };
+        } catch (e) { resolve(null); }
+      });
+    }, function () { return null; });
+  }
+
+  function idbDel() {
+    return idbOpen().then(function (db) {
+      if (!db) return false;
+      return new Promise(function (resolve) {
+        try {
+          var tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).delete(IDB_KEY);
+          tx.oncomplete = function () { resolve(true); };
+          tx.onerror = function () { resolve(false); };
+        } catch (e) { resolve(false); }
+      });
+    }, function () { return false; });
+  }
+
+  // 启动时把 IDB 里更全/更新的仓接管进内存（localStorage 镜像可能被配额砍过）
+  function rawIdbAdopt() {
+    return idbGet().then(function (txt) {
+      if (!txt) return false;
+      var o = null;
+      try { o = JSON.parse(txt); } catch (e) { return false; }
+      if (!o || !o.rows || !o.rows.length) return false;
+      var cur = rawBase();
+      // 与 localStorage 同口径：网关变了 / 仓里没有 base（升级前老仓）一律不认领
+      if (!o.base || o.base !== cur) return false;
+      var mem = rawLoad();
+      if (num(o.at) < num(mem.at) || o.rows.length <= mem.rows.length) return false;
+      rawStore = o;
+      rawAggMem = {};
+      rawVer++;
+      rawDegraded = false;    // 全量已经从 IDB 读回来，不再是「仅内存」
+      return true;
+    }, function () { return false; });
+  }
+
   var RAW_CAP = 40000;
   var RAW_KEEP_SEC = 7 * 86400 + 12 * 3600;
   var rawStore = null;
@@ -201,6 +298,8 @@
     rawDropMem();
     try { localStorage.removeItem(RAW_KEY); } catch (e) { }
     try { localStorage.removeItem(RAW_KEY_LEGACY); } catch (e1) { }
+    idbDel();                    // 换网关：IDB 里那份也必须作废，否则下次启动又被接管回来
+    rawDegraded = false;
     cacheClearAll();
     rawLoad();
   }
@@ -213,15 +312,22 @@
     st.at = Date.now();
     var json;
     try { json = JSON.stringify(st); } catch (e) { return; }
-    try { localStorage.setItem(RAW_KEY, json); return; } catch (e) { }
+    // ① 主存：IndexedDB 全量（异步，不阻塞扫描）；失败只影响持久化，不影响内存里的数据
+    idbSet(json);
+    // ② 兼容镜像：localStorage。写不进去不再砍行 —— 全量已在 IDB，砍了只会制造「覆盖区间倒退」
+    try { localStorage.setItem(RAW_KEY, json); rawDegraded = false; return; } catch (e) { }
     purgeLegacyCache();
-    try { localStorage.setItem(RAW_KEY, json); return; } catch (e2) { }
-    for (var cut = 12000; cut >= 4000; cut -= 4000) {
-      if (st.rows.length <= cut) break;
-      st.rows.length = cut;
-      st.known = false; st.complete = false;
-      rawMeta();
-      try { localStorage.setItem(RAW_KEY, JSON.stringify(st)); return; } catch (e3) { }
+    try { localStorage.setItem(RAW_KEY, json); rawDegraded = false; return; } catch (e2) { }
+    rawDegraded = true;
+    // ③ 只有 IDB 也不可用时才走老降级（内存 + 截断），否则全量留在 IDB 里
+    if (idbOK === false) {
+      for (var cut = 12000; cut >= 4000; cut -= 4000) {
+        if (st.rows.length <= cut) break;
+        st.rows.length = cut;
+        st.known = false; st.complete = false;
+        rawMeta();
+        try { localStorage.setItem(RAW_KEY, JSON.stringify(st)); rawDegraded = false; return; } catch (e3) { }
+      }
     }
   }
 
@@ -573,6 +679,18 @@
     if (a >= 1) return r.sym + v.toFixed(2);
     if (a >= 0.01) return r.sym + v.toFixed(3);
     return r.sym + v.toFixed(4);
+  }
+
+  // 累计金额用中文紧凑单位：¥890,379 这种长串在窄屏上挤掉别的列，且一眼读不出量级。
+  // 只用于「累计」，本期仍用 cnyOf 给精确值（¥70.44）。
+  function cnyCompact(q) {
+    var r = rateInfo();
+    var v = cnyNum(q);
+    if (!isFinite(v)) return r.sym + '—';
+    var a = Math.abs(v);
+    if (a < 10000) return cnyOf(q);
+    if (a >= 1e8) return r.sym + (v / 1e8).toFixed(2) + ' 亿';
+    return r.sym + (v / 1e4).toFixed(1) + ' 万';
   }
 
   function fmtTok(n) {
@@ -1301,7 +1419,7 @@
       '<span><b class="mono">' + (usage ? fmtInt(usage.req) : '—') + '</b> 请求</span>' +
       '<span><b class="mono">' + (usage ? fmtTok(usage.total) : '—') + '</b> Token</span>' +
       '<span>本期 <b class="mono cny">' + (usage ? cnyOf(usage.quota) : '—') + '</b></span>' +
-      '<span>累计 <b class="mono">' + (S.tokens ? cnyOf(usage ? Math.max(tokUsedSum(), num(usage.quota)) : tokUsedSum()) : '—') + '</b></span>' +
+      '<span>累计 <b class="mono">' + (S.tokens ? cnyCompact(usage ? Math.max(tokUsedSum(), num(usage.quota)) : tokUsedSum()) : '—') + '</b></span>' +
       '</div>' +
       '</div>';
 
@@ -1311,29 +1429,90 @@
       return;
     }
 
-    html += '<div class="card"><div class="card-h"><div class="card-t">令牌列表<span class="n">按「' +
-      esc(RANGE_NAME[curRange] || '本期') + '」消耗排序</span></div>' +
-      '<button class="tok-b ok" data-act="tok-new">＋ 新建</button></div>';
+    html += '<div class="card"><div class="card-h"><div class="card-t">令牌列表</div>' +
+      '<button class="tok-b ok" data-act="tok-new">＋ 新建</button></div>' +
+      '<div class="tok-tools">' +
+      '<input id="tok-q" type="search" placeholder="搜名称" value="' + esc(CFG.tokQuery || '') + '">' +
+      '<select id="tok-sort">' +
+      [['usage', '按消耗'], ['quota', '按剩余'], ['recent', '按最近'], ['name', '按名称']].map(function (o) {
+        return '<option value="' + o[0] + '" ' + ((CFG.tokSort || 'usage') === o[0] ? 'selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></div>' +
+      '<div class="seg" style="margin:0 0 8px">' +
+      [['all', '全部'], ['on', '启用'], ['off', '停用'], ['exp', '将过期']].map(function (o) {
+        return '<button data-act="tok-filter" data-f="' + o[0] + '" class="' + ((CFG.tokFilter || 'all') === o[0] ? 'on' : '') + '">' + o[1] + '</button>';
+      }).join('') + '</div>' +
+      '<div id="tok-list"></div></div>';
 
-    if (!S.tokens.length) html += '<div class="empty">没有令牌</div>';
+    html += '</div>';
+    el.innerHTML = html;
+    paintTokList();
 
-    var sorted = S.tokens.slice().sort(function (a, b) {
-      var wa = (usage && usage.byKey) ? (usage.byKey['#' + a.id] || usage.byKey[a.name] || null) : null;
-      var wb2 = (usage && usage.byKey) ? (usage.byKey['#' + b.id] || usage.byKey[b.name] || null) : null;
+    // 搜索框：只重画列表，不整页重画（否则每敲一个字都丢焦点）
+    var qEl = $('#tok-q');
+    if (qEl) {
+      var qTimer = null;
+      qEl.oninput = function () {
+        CFG.tokQuery = qEl.value;
+        if (qTimer) clearTimeout(qTimer);
+        qTimer = setTimeout(function () { qTimer = null; saveCfg(); paintTokList(); }, 120);
+      };
+      qEl.onchange = function () { saveCfg(); paintTokList(); };
+    }
+    var sortEl = $('#tok-sort');
+    if (sortEl) sortEl.onchange = function () {
+      CFG.tokSort = sortEl.value;
+      saveCfg();
+      paintTokList();
+    };
+  }
+
+  // 只重画列表容器：搜索框每敲一个字都要重排，整页 innerHTML 重画会丢焦点/光标。
+  function paintTokList() {
+    var box = $('#tok-list');
+    if (!box) return;
+    if (!S.tokens || !S.tokens.length) { box.innerHTML = '<div class="empty">没有令牌</div>'; return; }
+    var usage = S.usageLive || S.usage;
+    var now = Date.now();
+    var q = String(CFG.tokQuery || '').trim().toLowerCase();
+    var f = CFG.tokFilter || 'all';
+    var sortKey = CFG.tokSort || 'usage';
+    var soon = now + 7 * 86400 * 1000;
+
+    function win(t) {
+      if (!usage || !usage.byKey) return null;
+      return usage.byKey['#' + t.id] || usage.byKey[t.name] || null;
+    }
+    var list = S.tokens.filter(function (t) {
+      if (q && String(t.name).toLowerCase().indexOf(q) < 0) return false;
+      var exp = t.expired > 0 ? t.expired * 1000 : 0;
+      if (f === 'on' && t.status !== 1) return false;
+      if (f === 'off' && t.status === 1) return false;
+      if (f === 'exp' && !(exp && exp < soon)) return false;
+      return true;
+    });
+    list.sort(function (a, b) {
+      if (sortKey === 'name') return String(a.name).localeCompare(String(b.name), 'zh');
+      if (sortKey === 'recent') return num(b.accessed) - num(a.accessed);
+      if (sortKey === 'quota') {
+        var qa = a.unlimited ? Infinity : num(a.remain), qb = b.unlimited ? Infinity : num(b.remain);
+        return qb - qa;
+      }
+      var wa = win(a), wb2 = win(b);
       var va = wa ? num(wa.tokens) : 0, vb = wb2 ? num(wb2.tokens) : 0;
       if (vb !== va) return vb - va;
       return num(b.used) - num(a.used);
     });
 
-    sorted.forEach(function (t) {
-      var w = null;
-      if (usage && usage.byKey) w = usage.byKey['#' + t.id] || usage.byKey[t.name] || null;
-      var isExpired = t.expired > 0 && t.expired * 1000 < Date.now();
+    if (!list.length) { box.innerHTML = '<div class="empty">没有符合条件的令牌</div>'; return; }
+
+    box.innerHTML = list.map(function (t) {
+      var w = win(t);
+      var isExpired = t.expired > 0 && t.expired * 1000 < now;
       // 状态不再单独占一个胶囊：启停按钮本身就是状态（点「停用」说明当前启用），
       // 停用的行在下面小字里标红「已停用」，整行也会变暗。
       var expiry = t.expired < 0 ? '永不过期' : (isExpired ? '已过期 ' + fmtDate(t.expired) : '至 ' + fmtDate(t.expired));
 
-      html += '<div class="tok' + (t.status === 1 ? '' : ' off') + '" data-id="' + t.id + '">' +
+      return '<div class="tok' + (t.status === 1 ? '' : ' off') + '" data-id="' + t.id + '">' +
         '<div class="tok-h"><div class="tok-name">' + pv(t.name) + '</div>' +
         (isExpired ? '<span class="pill warn">过期</span>' : '') +
         '<button class="tok-b ' + (t.status === 1 ? 'warn' : 'ok') + '" data-act="toggle" data-id="' + t.id + '">' + (t.status === 1 ? '停用' : '启用') + '</button>' +
@@ -1343,7 +1522,7 @@
         '<span><b class="mono">' + (!usage ? '…' : fmtTok(w ? w.tokens : 0)) + '</b> Token</span>' +
         '<span><b class="mono">' + (!usage ? '—' : (w ? fmtInt(w.req) : '0')) + '</b> 请求</span>' +
         '<span><b class="mono cny">' + (!usage ? '…' : cnyOf(w ? w.quota : 0)) + '</b></span>' +
-        '<span>累计 <b class="mono">' + cnyOf(cumQuota(t.used, w)) + '</b></span>' +
+        '<span>累计 <b class="mono">' + cnyCompact(cumQuota(t.used, w)) + '</b></span>' +
         '</div>' +
         '<div class="tok-sub">' +
         (t.status === 1 ? '' : '<span style="color:#fca5a5">已停用</span>') +
@@ -1352,9 +1531,7 @@
         '<span>' + ago(t.accessed) + '</span>' +
         '<span>' + (t.models.length ? '限 ' + t.models.length + ' 模型' : '不限模型') + '</span>' +
         '</div></div>';
-    });
-    html += '</div>';
-    el.innerHTML = html;
+    }).join('');
   }
 
   function setRange(r) {
@@ -1426,17 +1603,25 @@
       localStorage.setItem(SHARE_MARK, JSON.stringify(o));
     } catch (e) { }
   }
-  // 分享地址独立于「自己用的网关地址」：自己常用内网 IP，发给别人必须是公网域名
-  function shareBase() { return trimBase(CFG.shareBase || CFG.newapiBase); }
+  // 分享地址独立于「自己用的网关地址」：自己常用内网 IP，发给别人必须是公网域名。
+  // 构建期可注入默认值（private/.env 的 TD_PRESET_SHARE_BASE），公开源码里不留真实域名。
+  var SHARE_PRESET = '__PRESET_SHARE_BASE__';
+  function shareBase() {
+    if (CFG.shareBase) return trimBase(CFG.shareBase);
+    if (presetOk(SHARE_PRESET)) return trimBase(SHARE_PRESET);
+    return trimBase(CFG.newapiBase);
+  }
   function modelLineOf(t) {
     var ml = (t && t.raw && t.raw.model_limits_enabled) ? String(t.raw.model_limits || '').trim() : '';
     return ml || '不限';
   }
   function shareTextFor(t, key, base) {
     var b = trimBase(base || shareBase());
+    var k = 'sk-' + String(key || '').replace(/^sk-/, '');
     return '接口地址：' + b + '/v1\n' +
-      '密钥：sk-' + String(key || '').replace(/^sk-/, '') + '\n' +
-      '模型：' + modelLineOf(t);
+      '密钥：' + k + '\n' +
+      '模型：' + modelLineOf(t) + '\n' +
+      '自测：curl ' + b + '/v1/models -H "Authorization: Bearer ' + k + '"';
   }
   function copyToClip(text) {
     if (window.NativeBridge && window.NativeBridge.copy) window.NativeBridge.copy(text);
@@ -1741,7 +1926,7 @@
         if (!st2.rows.length) return '';
         return '<div class="note" style="margin-top:6px">本机 <b class="mono" style="color:#e6edf3">' + fmtInt(st2.rows.length) +
           '</b> 条 · <span class="mono" style="color:#9fb3c8">' + fmtShort(st2.since) + ' → ' + fmtShort(st2.newest) +
-          '</span></div>';
+          '</span>' + (rawDegraded ? ' <span class="pill warn">仅内存</span>' : '') + '</div>';
       })() +
       '<div class="note" style="margin-top:8px">输入 ' + fmtTok(agg.prompt) + ' · 输出 ' + fmtTok(agg.completion) +
       (agg.filling ? ' · 补齐中' : '') +
@@ -2189,7 +2374,7 @@
   // ─────────────────────────────────────────── 应用内更新检查（只提示，不自动下载）
   // 行为约定：有新版本只在设置页显示一行 + 可复制下载地址；不弹窗、不自动下载、
   // 不走 errBox；网络失败静默（手动查失败才给一句 toast）。不改 Java、不跳浏览器。
-  var UPD = { state: 'idle', cur: '', tag: '', url: '', notes: '', at: 0 };
+  var UPD = { state: 'idle', cur: '', tag: '', url: '', apkUrl: '', notes: '', at: 0, dlBusy: false };
 
   function curVer() {
     var info = null;
@@ -2250,7 +2435,7 @@
     try {
       localStorage.setItem(UPD_LAST, JSON.stringify({
         day: updDay(Date.now()), cur: UPD.cur, tag: UPD.tag, state: UPD.state,
-        url: UPD.url, notes: updNotes(), at: UPD.at
+        url: UPD.url, apkUrl: UPD.apkUrl, notes: updNotes(), at: UPD.at
       }));
     } catch (e) { }
   }
@@ -2268,9 +2453,29 @@
     if (o.state !== 'latest' && o.state !== 'new') return;
     UPD = {
       state: o.state, cur: cur, tag: String(o.tag || ''), url: String(o.url || ''),
-      notes: String(o.notes || ''), at: Number(o.at) || 0
+      apkUrl: String(o.apkUrl || ''), notes: String(o.notes || ''), at: Number(o.at) || 0,
+      dlBusy: false
     };
   }
+
+  // 应用内更新：有原生桥（壳内）才谈得上「下载并安装」；网页版没有下载能力，只能复制地址
+  function canInstallApk() {
+    return !!(window.NativeBridge && window.NativeBridge.downloadApk);
+  }
+
+  // Java 侧下完/失败后回调这里（见 MainActivity.startApkDownload）
+  window.__onApk = function (r) {
+    if (!r) return;
+    UPD.dlBusy = false;
+    if (r.ok) {
+      toast(r.msg || '下载完成', 'ok');
+    } else {
+      toast(String(r.msg || '下载失败'), 'err');
+    }
+    // 结果写进 note 行（updNotes 只认 UPD.notes，别另开字段，否则界面看不到结果）
+    UPD.notes = String(r.msg || (r.ok ? '下载完成' : '下载失败'));
+    updPaint();
+  };
 
   // 只贴这一小块 DOM，不整页重渲染：否则检查完会把用户正在填的输入和滚动位置冲掉
   function updPaint() {
@@ -2284,6 +2489,9 @@
     if (btn) { btn.disabled = UPD.state === 'checking'; btn.textContent = UPD.state === 'checking' ? '检查中…' : '检查更新'; }
     var cp = $('#f-updcopy');
     if (cp) cp.style.display = (UPD.state === 'new' && UPD.url) ? '' : 'none';
+    // 应用内更新：能下载就露「下载并安装」，网页版只能复制地址
+    var dl = $('#f-upddl');
+    if (dl) dl.style.display = (UPD.state === 'new' && UPD.apkUrl && canInstallApk()) ? '' : 'none';
     var note = $('#upd-note');
     if (note) {
       var t = updNotes();
@@ -2335,6 +2543,13 @@
       UPD.at = Date.now();
       UPD.tag = String((j && j.tag_name) || '').replace(/^v/i, '').trim();   // 预发布后缀忽略：我们不发预发布
       UPD.url = (j && j.html_url) || '';
+      // 应用内更新要的是 APK 附件直链，不是 release 页面地址
+      UPD.apkUrl = '';
+      var assets = (j && j.assets) || [];
+      for (var ai = 0; ai < assets.length; ai++) {
+        var an = String((assets[ai] && assets[ai].name) || '');
+        if (/\.apk$/i.test(an)) { UPD.apkUrl = String(assets[ai].browser_download_url || ''); break; }
+      }
       UPD.notes = (j && j.body) || '';
       UPD.state = (UPD.tag && verCmp(cur, UPD.tag) < 0) ? 'new' : 'latest';
       mark();
@@ -2449,7 +2664,8 @@
       // 「今天 09:29 查过」：跟结论同一个时间戳，跨天/换版本就不显示（见 updRestore 的三条门槛）
       '<div class="note" id="upd-at" style="display:none;margin:-2px 0 8px;color:var(--dim-2)"></div>' +
       '<div class="tok-acts" style="margin:0 0 10px"><button class="btn ghost" id="f-updcheck" style="height:38px">检查更新</button>' +
-      '<button class="btn ghost" id="f-updcopy" style="height:38px;display:none">复制下载地址</button></div>' +
+      '<button class="btn ok" id="f-upddl" style="height:38px;display:none">下载并安装</button>' +
+      '<button class="btn ghost" id="f-updcopy" style="height:38px;display:none">复制地址</button></div>' +
       '<div class="note" id="upd-note" style="display:none"></div>' +
       '<div class="hr"></div>' +
       '<div class="tok-acts"><button class="btn danger" id="f-clear">清除配置</button>' +
@@ -2609,6 +2825,44 @@
     }
     $('#f-save').onclick = saveAndGo;
     $('#f-save2').onclick = saveAndGo;
+
+    // ── 统计偏好：改了立刻存，不等「保存并连接」 ────────────────────
+    // 原来这四项只在 saveAndGo 的 collect() 里读一次，用户改完不点「保存并连接」就什么都不发生，
+    // 切到别的页签再回来又被 renderSettings 的旧 CFG 值覆盖 —— 表现就是「改了不保存、没生效」。
+    function prefSave() { saveCfg(); }
+    var rangeSel = $('#f-range');
+    if (rangeSel) rangeSel.onchange = function () {
+      CFG.range = rangeSel.value;
+      prefSave();
+      toast('默认范围：' + (RANGE_NAME[CFG.range] || CFG.range), 'ok');
+    };
+    var pageIn = $('#f-maxpages');
+    if (pageIn) pageIn.onchange = function () {
+      CFG.maxPages = String(pageIn.value || '').trim() || '80';
+      pageIn.value = CFG.maxPages;
+      prefSave();
+      toast('最大翻页数：' + CFG.maxPages, 'ok');
+    };
+    var autoSelEl = $('#f-auto');
+    if (autoSelEl) autoSelEl.onchange = function () {
+      CFG.autoRefresh = autoSelEl.value;
+      prefSave();
+      startAutoRefresh();          // 立刻按新间隔重排定时器（0 = 关掉）
+      toast(String(CFG.autoRefresh) === '0' ? '自动刷新：已关闭'
+        : '自动刷新：每 ' + (num(CFG.autoRefresh) >= 60 ? (num(CFG.autoRefresh) / 60) + ' 分钟' : CFG.autoRefresh + ' 秒'), 'ok');
+    };
+    var pfSelEl = $('#f-prefetch');
+    if (pfSelEl) pfSelEl.onchange = function () {
+      CFG.prefetch = pfSelEl.value;
+      prefSave();
+      if (CFG.prefetch === '0') {
+        if (prefetchTimer) { clearTimeout(prefetchTimer); prefetchTimer = null; }
+        toast('后台预取：已关闭', 'ok');
+      } else {
+        schedulePrefetch(800);     // 打开就立即补一次，不用等下次启动
+        toast('后台预取：开启（正在补齐 7 天）', 'ok');
+      }
+    };
     $('#f-natest').onclick = function () {
       collect();
       toast('测试中…');
@@ -2668,6 +2922,19 @@
       if (window.NativeBridge && window.NativeBridge.copy) window.NativeBridge.copy(UPD.url);
       else if (navigator.clipboard) navigator.clipboard.writeText(UPD.url);
       toast('下载地址已复制', 'ok');
+    };
+    var updDlBtn = $('#f-upddl');
+    if (updDlBtn) updDlBtn.onclick = function () {
+      if (!UPD.apkUrl || UPD.dlBusy) return;
+      if (!canInstallApk()) { toast('当前环境不能直接安装，请复制地址', 'err'); return; }
+      UPD.dlBusy = true;
+      toast('开始下载更新…');
+      try {
+        window.NativeBridge.downloadApk(UPD.apkUrl, UPD.tag || '');
+      } catch (e) {
+        UPD.dlBusy = false;
+        toast('调用下载失败：' + e.message, 'err');
+      }
     };
     updPaint();   // 重渲染后把已有状态（检查中/已是最新/发现新版本）贴回新 DOM
 
@@ -3134,6 +3401,14 @@
       CFG.tokenCleared = true;
     }
     saveCfg();
+    // 启动先接管 IDB 里更全的仓：localStorage 镜像可能因配额被砍过（老版本会砍到 4000–12000 行）
+    rawIdbAdopt().then(function (adopted) {
+      if (!adopted) return;
+      rawAggMem = {};
+      rawVer++;
+      if (S.tab === 'usage') renderUsage();
+      if (S.tab === 'overview') renderOverview();
+    });
     bindTabs();
     $('#btn-refresh').onclick = refreshCurrent;
     syncEye();
@@ -3195,7 +3470,12 @@
       if (act === 'toggle') toggleToken(id);
       else if (act === 'edit') openTokenSheet(id);
       else if (act === 'key') copyKey(id);
-      else if (act === 'tok-new') newTokenSheet();
+      if (act === 'tok-new') newTokenSheet();
+      else if (act === 'tok-filter') {
+        CFG.tokFilter = btn.getAttribute('data-f') || 'all';
+        saveCfg();
+        renderTokens();
+      }
     });
 
     document.addEventListener('click', function (e) {
@@ -3240,7 +3520,7 @@
     state: S, cfg: function () { return CFG; }, showTab: showTab, refreshAll: refreshAll,
     loadOverview: loadOverview, loadUsage: loadUsage, loadWB: loadWB,
     refreshUsageDelta: refreshUsageDelta, autoTick: autoTick, startAutoRefresh: startAutoRefresh,
-    raw: function () { var st = rawLoad(); return { at: st.at, since: st.since, newest: st.newest, pages: st.pages, complete: st.complete, coverFrom: st.coverFrom == null ? null : st.coverFrom, rows: st.rows.length }; },
+    raw: function () { var st = rawLoad(); return { at: st.at, since: st.since, newest: st.newest, pages: st.pages, complete: st.complete, coverFrom: st.coverFrom == null ? null : st.coverFrom, rows: st.rows.length, degraded: rawDegraded, idb: idbOK }; },
     pf: function () { return { queued: prefetchQueued, timer: !!prefetchTimer, scan: (rawLoad().scan || null) }; },
     meta: function () { rawMeta(); rawSave(true); return this.raw(); },
     probe: function () {
@@ -3251,7 +3531,7 @@
     },
     lastErr: function () { return S.lastErr || null; },
     lastScan: function () { return rawLoad().scan || null; },
-    rawAgg: rawAggFor, rawClear: function () { try { localStorage.removeItem(RAW_KEY); } catch (e) {} rawStore = null; rawAggMem = {}; rawVer++; },
+    rawAgg: rawAggFor, rawClear: function () { try { localStorage.removeItem(RAW_KEY); } catch (e) {} idbDel(); rawStore = null; rawAggMem = {}; rawVer++; rawDegraded = false; },
     backfillTiming: backfillTiming, speedText: speedText,
     reqlog: function () { return (S.reqlog || []).length; },
     /* ── 测试钩子（P0-0 harness 用，无副作用，不参与业务逻辑）── */
@@ -3267,6 +3547,11 @@
     // 日志仓所属网关的规范值（只读）：harness 的 seedRaw 要按当前网关打指纹，
     // 否则「无 base 的老仓一律作废」会把每个 fixture 的 seed 都当成待清仓
     gatewayBase: function () { return rawBase(); },
+    // 日志仓持久层（IndexedDB）显式接口：F29 用它证明「配额写满也不砍行、重启能从 IDB 接上」
+    rawAdopt: function () { return rawIdbAdopt(); },
+    rawDropMem: function () { rawDropMem(); },
+    // 自动刷新状态（只读）：定时器在不在 + 当前间隔。F27 用它证明「改完立刻生效」不是只写了配置。
+    autoState: function () { return { on: !!autoTimer, sec: num(CFG.autoRefresh) }; },
     // 本页第一次 rawLoad() 看到的网关值（只读）：凭证通道若被改成异步/延后加载，
     // 这里会变成 ''，等于把「每次冷启动整仓清空重扫」摆到断言里
     rawFirstBase: function () { return rawFirstBase; },
