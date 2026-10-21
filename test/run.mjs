@@ -29,9 +29,8 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');            // = public/
 const ASSETS = path.join(ROOT, 'app', 'assets');
-// Chrome profile 属于一次性产物，放缓存目录，绝不落进仓库。
-// fallback 用系统临时目录而非 $HOME/.hermes/...（那是作者本机工具链的目录约定，
-// 写进公开仓库会连带暴露用户名/工具路径，谁跑都一样落地即可）。
+// Chrome profile 属于一次性产物，进系统临时目录，绝不落进仓库。
+// 优先用 BH_AGENT_WORKSPACE（CI/沙箱里指向专用缓存），否则用系统临时目录。
 const SCRATCH = process.env.BH_AGENT_WORKSPACE || process.env.TMPDIR || os.tmpdir();
 const CHROME_PROFILE = path.join(SCRATCH, 'td-test-chrome');
 
