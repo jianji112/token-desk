@@ -1294,12 +1294,14 @@
         return '<button data-act="tok-range" data-range="' + r + '" class="' + (curRange === r ? 'on' : '') + '">' +
           RANGE_NAME[r] + '</button>';
       }).join('') + '</div>' +
-      '<div class="kv"><span class="k">令牌 Key 数</span><span class="v mono">' + (S.tokens ? tTotal : '—') +
-      (S.over && S.over.tokenTruncated ? ' <span class="pill warn">仅显示前 ' + S.tokens.length + '</span>' : '') + '</span></div>' +
-      '<div class="kv"><span class="k">窗口请求</span><span class="v mono">' + (usage ? fmtInt(usage.req) : '—') + '</span></div>' +
-      '<div class="kv"><span class="k">窗口 Token</span><span class="v mono">' + (usage ? fmtTok(usage.total) : '—') + '</span></div>' +
-      '<div class="kv"><span class="k">本期消耗</span><span class="v mono cny">' + (usage ? cnyOf(usage.quota) : '—') + '</span></div>' +
-      '<div class="kv"><span class="k">累计消耗</span><span class="v mono">' + (S.tokens ? cnyOf(usage ? Math.max(tokUsedSum(), num(usage.quota)) : tokUsedSum()) : '—') + '</span></div>' +
+      '<div class="tok-line" style="margin-top:8px">' +
+      '<span><b class="mono">' + (S.tokens ? tTotal : '—') + '</b> Key</span>' +
+      (S.over && S.over.tokenTruncated ? '<span class="pill warn">前 ' + S.tokens.length + '</span>' : '') +
+      '<span><b class="mono">' + (usage ? fmtInt(usage.req) : '—') + '</b> 请求</span>' +
+      '<span><b class="mono">' + (usage ? fmtTok(usage.total) : '—') + '</b> Token</span>' +
+      '<span>本期 <b class="mono cny">' + (usage ? cnyOf(usage.quota) : '—') + '</b></span>' +
+      '<span>累计 <b class="mono">' + (S.tokens ? cnyOf(usage ? Math.max(tokUsedSum(), num(usage.quota)) : tokUsedSum()) : '—') + '</b></span>' +
+      '</div>' +
       '</div>';
 
     if (!S.tokens) {
@@ -1325,30 +1327,28 @@
       var w = null;
       if (usage && usage.byKey) w = usage.byKey['#' + t.id] || usage.byKey[t.name] || null;
       var isExpired = t.expired > 0 && t.expired * 1000 < Date.now();
-      var statusPill = t.status === 1
-        ? '<span class="pill ok">已启用</span>'
-        : '<span class="pill off">已停用</span>';
+      // 状态不再单独占一个胶囊：启停按钮本身就是状态（点「停用」说明当前启用），
+      // 停用的行在下面小字里标红「已停用」，整行也会变暗。
       var expiry = t.expired < 0 ? '永不过期' : (isExpired ? '已过期 ' + fmtDate(t.expired) : '至 ' + fmtDate(t.expired));
 
       html += '<div class="tok' + (t.status === 1 ? '' : ' off') + '" data-id="' + t.id + '">' +
-        '<div class="tok-h"><div class="tok-name">' + pv(t.name) + '</div>' + statusPill +
-        (isExpired ? '<span class="pill warn">过期</span>' : '') + '</div>' +
-        '<div class="tok-grid">' +
-        '<div><span class="k">本期 Token</span><b class="mono">' + (!usage ? '统计中…' : fmtTok(w ? w.tokens : 0)) + '</b></div>' +
-        '<div><span class="k">本期请求</span><b class="mono">' + (!usage ? '—' : (w ? fmtInt(w.req) : '0')) + '</b></div>' +
-        '<div><span class="k">本期消耗</span><b class="mono cny">' + (!usage ? '统计中…' : cnyOf(w ? w.quota : 0)) + '</b></div>' +
-        '<div><span class="k">累计消耗</span><b class="mono">' + cnyOf(cumQuota(t.used, w)) + '</b></div>' +
+        '<div class="tok-h"><div class="tok-name">' + pv(t.name) + '</div>' +
+        (isExpired ? '<span class="pill warn">过期</span>' : '') +
+        '<button class="tok-b ' + (t.status === 1 ? 'warn' : 'ok') + '" data-act="toggle" data-id="' + t.id + '">' + (t.status === 1 ? '停用' : '启用') + '</button>' +
+        '<button class="tok-b" data-act="edit" data-id="' + t.id + '">编辑</button>' +
+        '<button class="tok-b" data-act="key" data-id="' + t.id + '">Key</button></div>' +
+        '<div class="tok-line">' +
+        '<span><b class="mono">' + (!usage ? '…' : fmtTok(w ? w.tokens : 0)) + '</b> Token</span>' +
+        '<span><b class="mono">' + (!usage ? '—' : (w ? fmtInt(w.req) : '0')) + '</b> 请求</span>' +
+        '<span><b class="mono cny">' + (!usage ? '…' : cnyOf(w ? w.quota : 0)) + '</b></span>' +
+        '<span>累计 <b class="mono">' + cnyOf(cumQuota(t.used, w)) + '</b></span>' +
         '</div>' +
         '<div class="tok-sub">' +
-        '<span><i>剩余额度</i>' + (t.unlimited ? '无限' : fmtQty(t.remain)) + '</span>' +
-        '<span><i>有效期</i>' + esc(expiry) + '</span>' +
-        '<span><i>最后使用</i>' + ago(t.accessed) + '</span>' +
-        (t.models.length ? '<span><i>模型</i>限定 ' + t.models.length + ' 个</span>' : '<span><i>模型</i>不限</span>') +
-        '</div>' +
-        '<div class="tok-acts">' +
-        '<button class="btn ' + (t.status === 1 ? 'danger' : 'ok') + '" data-act="toggle" data-id="' + t.id + '">' + (t.status === 1 ? '停用' : '启用') + '</button>' +
-        '<button class="btn" data-act="edit" data-id="' + t.id + '">编辑</button>' +
-        '<button class="btn ghost" data-act="key" data-id="' + t.id + '">复制 Key</button>' +
+        (t.status === 1 ? '' : '<span style="color:#fca5a5">已停用</span>') +
+        '<span>剩 ' + (t.unlimited ? '无限' : fmtQty(t.remain)) + '</span>' +
+        '<span>' + esc(expiry) + '</span>' +
+        '<span>' + ago(t.accessed) + '</span>' +
+        '<span>' + (t.models.length ? '限 ' + t.models.length + ' 模型' : '不限模型') + '</span>' +
         '</div></div>';
     });
     html += '</div>';
