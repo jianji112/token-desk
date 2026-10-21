@@ -74,7 +74,9 @@ public final class ApkDownload {
             conn.setReadTimeout(readMs > 0 ? readMs : 60000);
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("Accept-Encoding", "identity");
-            conn.setRequestProperty("User-Agent", "TokenDesk/1.0 (Android)");
+            // UA 不再带 App 标识（1.1.0）：`TokenDesk/1.0` 会被带 UA 白名单的网关/WAF 判成陌生客户端。
+            // 也不能空着不发 —— 默认的 Dalvik/x.y 同样容易被挡，这里给普通 Chrome 形态。
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36");
             int code = conn.getResponseCode();
             if (code != 200 && code != 206) {
                 throw new IOException("HTTP " + code);

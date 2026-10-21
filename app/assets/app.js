@@ -12,6 +12,11 @@
   // 上一次检查的结论（只存结论，不存「检查中」）。同日重开 App 时设置页要能接着显示
   // 「已是最新（v1.0.72） · 今天 09:29 查过」——否则用户刚查完、关掉再开就看到「未检查」，像坏了。
   var UPD_LAST = 'tokendesk.updlast.v1';
+  // 限频时间戳：不管成功还是失败都记，跨启动生效。用它做 6 小时窗口而不是 UPD_DAY，
+  // 是因为 UPD_DAY 只在「成功且是今天」时才有意义 —— 失败/跨天时它一律不生效，
+  // 结果就是每次冷启都往 GitHub 打一次（未认证 60 次/小时/IP，弱网用户会被打穿）。
+  var UPD_AT = 'tokendesk.updat.v1';
+  var UPD_MAXAGE = 6 * 3600 * 1000;   // 启动/定时检查的最小间隔：6 小时
   var UPD_URLS = [
     'https://api.github.com/repos/jianji112/token-desk/releases/latest'
   ];
@@ -85,7 +90,7 @@
     return e || null;
   }
 
-  var MEM_ONLY = /\/api\/log\//;
+  var MEM_ONLY = /\/api\/log\/|\/usage\/recent/;
 
   var CACHE_MEM_MAX = 20;
 
@@ -369,6 +374,14 @@
       st.capped = true;
       if (st.coverFrom == null || st.coverFrom < cutTs) st.coverFrom = cutTs;
     }
+    // ⭐ capped = 翻页到上限 / 撞容量上限 → 仓里的数据是「从最新往回连续翻」得来的，
+    // 所以真实覆盖起点就是最老那一行。而 coverFrom 可能还停在旧窗口（比如只扫过 24 小时时
+    // 标记的 now-24h）→ 表现为「7 天窗口明明有 278 页数据，UI 却写仅覆盖 24 小时 + 满屏斜纹」。
+    // 取更早的那个（= 更保守的那份声明），只在 capped 时做，避免把「已扫过更早窗口」的标记改坏。
+    if (st.capped && !st.scanDirty && st.rows.length) {
+      var oldestTs = st.rows[st.rows.length - 1][0];
+      if (st.coverFrom == null || st.coverFrom > oldestTs) st.coverFrom = oldestTs;
+    }
     if (st.rows[0][0] < st.rows[st.rows.length - 1][0]) {
       st.rows.sort(function (a, b) { return b[0] - a[0]; });
     }
@@ -462,6 +475,306 @@
     return agg;
   }
 
+  // ── 概览「用量波形」：只用本地日志仓按时间桶聚合，不发新请求 ─────────────────
+  // 今天 / 24 小时 → 每 1 小时一桶（24～25 个点）；7 天 → 每 6 小时一桶（28 个点，
+  // 这样昼夜节奏才看得出来，按天只有 7 个点会糊成柱状）。
+  var SERIES_SPEC = {
+    today: { b: 3600, unit: '每 1 小时' },
+    '24h': { b: 3600, unit: '每 1 小时' },
+    '7d': { b: 6 * 3600, unit: '每 6 小时' }
+  };
+  var seriesMem = {};        // range -> {key, out}
+  var waveDisplayed = null;  // 屏幕上这一帧的纵坐标（帧间插值的起点）
+  var waveRaf = 0;
+
+  function rawSeries(range) {
+    var st = rawLoad();
+    var key = rawVer + '|' + st.rows.length + '|' + (st.newest || 0) + '|' + (st.coverFrom || 0) + '|' + (st.capped ? 1 : 0);
+    var hit = seriesMem[range];
+    if (hit && hit.key === key) return hit.out;
+
+    var spec = SERIES_SPEC[range] || SERIES_SPEC['24h'];
+    var b = spec.b;
+    var nowSec = Math.floor(Date.now() / 1000);
+    var end = Math.floor(nowSec / b) * b + b;   // 当前桶的右边界
+    var cnt, start;
+    if (range === 'today') {
+      var d0 = new Date();
+      d0.setHours(0, 0, 0, 0);
+      start = Math.floor(d0.getTime() / 1000);
+      cnt = Math.max(1, Math.floor((nowSec - start) / b) + 1);
+    } else {
+      cnt = (range === '7d') ? 28 : 24;
+      start = end - cnt * b;
+    }
+
+    var pts = [], i;
+    for (i = 0; i < cnt; i++) pts.push({ t0: start + i * b, tok: 0, req: 0, unk: false });
+
+    // 仓里没覆盖到的老桶标成 unknown：波形照样画，但要如实说「只覆盖了多少」。
+    // ⚠ 用 floor 不用 ceil：coverFrom 是「从这一秒起完整」的声明，窗口起点通常比它早
+    // 不到一个桶（24 小时窗口的 start 是桶边界对齐的，天然早 ≤1 小时）→ ceil 会把这一桶
+    // 也标成未覆盖，看起来就是「明明有 24 小时数据，左边却还挂着一条斑马纹」。
+    // 只有「整桶都在 coverFrom 之前」才算未覆盖。
+    var unknown = 0;
+    if (st.coverFrom && st.coverFrom > start) {
+      unknown = Math.min(cnt, Math.max(0, Math.floor((st.coverFrom - start) / b)));
+      for (i = 0; i < unknown; i++) pts[i].unk = true;
+    }
+
+    for (var j = 0; j < st.rows.length; j++) {
+      var r = st.rows[j], ts = r[0];
+      if (ts < start) break;       // rows 降序，越界即收工
+      var k = Math.floor((ts - start) / b);
+      if (k < 0 || k >= cnt) continue;
+      pts[k].tok += num(r[4]) + num(r[5]);
+      pts[k].req++;
+    }
+
+    var peak = 0, total = 0, req = 0;
+    for (i = 0; i < cnt; i++) {
+      if (pts[i].tok > peak) peak = pts[i].tok;
+      total += pts[i].tok;
+      req += pts[i].req;
+    }
+    var out = { range: range, b: b, unit: spec.unit, start: start, cnt: cnt, pts: pts,
+      peak: peak, total: total, req: req, unknown: unknown, capped: !!st.capped };
+    seriesMem[range] = { key: key, out: out };
+    return out;
+  }
+
+  /** 纵轴用 sqrt：大峰值不会把小流量压成一条线；每桶留 2% 底线，空桶也不贴边。
+   *  显示层再做 1–2 遍 [1,2,1]/4 平滑（端点不动）：小时桶的锯齿是采样噪声，
+   *  不平滑的话曲线像心电图。原始桶值不受影响 —— 峰值文案、横拖读数都还是真值。 */
+  function smoothVals(v, passes) {
+    var out = v.slice(), p, i;
+    for (p = 0; p < passes; p++) {
+      var src = out.slice();
+      for (i = 1; i < out.length - 1; i++) out[i] = (src[i - 1] + src[i] * 2 + src[i + 1]) / 4;
+    }
+    return out;
+  }
+
+  function seriesVals(ser) {
+    var peak = ser.peak || 1, raw = [], i;
+    for (i = 0; i < ser.pts.length; i++) raw.push(Math.max(2, Math.sqrt(ser.pts[i].tok / peak) * 96));
+    return smoothVals(raw, ser.range === '7d' ? 2 : 1);
+  }
+
+  /** 平滑曲线：Catmull-Rom 切线 → 三次贝塞尔（折线太生硬，这是「丝滑」的关键）。
+   *  tension 0.92：接近圆润但不至于懒散；控制点纵向夹在 0–100，
+   *  否则样条过冲会让曲线钻到基线以下，看起来像「负流量」。 */
+  var WAVE_TENSION = 0.92;
+
+  function seriesPath(vals, close) {
+    var n = vals.length, x0 = 1.5, x1 = 98.5, i;
+    var step = (x1 - x0) / Math.max(1, n - 1);
+    var P = [];
+    for (i = 0; i < n; i++) P.push([x0 + i * step, 100 - vals[i]]);
+    var f = function (v) { return v.toFixed(2); };
+    // 单点（今天 00:0x 只有一个桶）时只输出 M 的话 SVG 什么都不画 → 补一条 0.01 宽的水平线段保底
+    if (n < 2) {
+      var y0 = f(P[0][1]);
+      var seg = 'M' + f(P[0][0]) + ' ' + y0 + 'L' + f(P[0][0] + 0.01) + ' ' + y0;
+      return close ? seg + 'L' + f(P[0][0] + 0.01) + ' 100L' + f(P[0][0]) + ' 100Z' : seg;
+    }
+    var d = 'M' + f(P[0][0]) + ' ' + f(P[0][1]);
+    for (i = 0; i < n - 1; i++) {
+      var p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || P[i + 1];
+      var k = WAVE_TENSION / 6;
+      var c1x = p1[0] + (p2[0] - p0[0]) * k, c1y = p1[1] + (p2[1] - p0[1]) * k;
+      var c2x = p2[0] - (p3[0] - p1[0]) * k, c2y = p2[1] - (p3[1] - p1[1]) * k;
+      c1y = Math.max(0, Math.min(100, c1y));
+      c2y = Math.max(0, Math.min(100, c2y));
+      d += 'C' + f(c1x) + ' ' + f(c1y) + ' ' + f(c2x) + ' ' + f(c2y) + ' ' + f(p2[0]) + ' ' + f(p2[1]);
+    }
+    if (close) d += 'L' + f(P[n - 1][0]) + ' 100L' + f(P[0][0]) + ' 100Z';
+    return d;
+  }
+
+  function resample(vals, n) {
+    if (!vals || !vals.length) return null;
+    if (vals.length === n) return vals.slice();
+    var out = [], step = (vals.length - 1) / Math.max(1, n - 1), i;
+    for (i = 0; i < n; i++) {
+      var x = i * step, i0 = Math.floor(x), f = x - i0;
+      var a = vals[i0], b2 = vals[Math.min(vals.length - 1, i0 + 1)];
+      out.push(a + (b2 - a) * f);
+    }
+    return out;
+  }
+
+  function bucketText(t0, b) {
+    var d = new Date(t0 * 1000), e = new Date((t0 + b) * 1000);
+    var left = (b >= 21600 ? pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' : '') +
+      pad2(d.getHours()) + ':00';
+    var right = pad2(e.getHours()) + ':00';
+    if (e.getDate() !== d.getDate()) right = pad2(e.getMonth() + 1) + '-' + pad2(e.getDate()) + ' ' + right;
+    return left + '–' + right;
+  }
+
+  /** 横轴时间刻度：等分打点（含首尾），标该桶的起点时刻。
+   *  - 小时桶（今天 / 24 小时）→ `HH:00`，5 个（间隔 6 小时，规整）
+   *  - 6 小时桶（7 天）→ `MM-DD`，**4 个**：28 桶 ÷ 3 = 9 桶 = 2.25 天，
+   *    日期不会挤成相邻两天；用 5 个等分点则是 6.75 桶（1.75 天），
+   *    四舍五入后会出现「10-16、10-17」这种看着像画错的相邻刻度。
+   *  只画刻度不画网格线：46px 高的迷你图里网格线纯噪声，读数靠下面这行 + 横拖。 */
+  function waveAxis(ser) {
+    var n = ser && ser.cnt;
+    if (!n || n < 2) return '';
+    var b = ser.b, byDay = b >= 21600, cells = [];
+    var marks = byDay ? 4 : 5;
+    marks = Math.min(marks, n);              // 桶特别少时（今天刚过零点）不许重复取点
+    // 取整用 floor：小时档 24 桶 ÷ 4 段 = 5.75 → round 会得到 0/6/12/17/23（中间差 5 小时），
+    // floor 得 0/5/11/17/23 → 21:00 02:00 08:00 14:00 20:00，首尾贴窗口两端、只差头一段 1 小时。
+    for (var i = 0; i < marks; i++) {
+      var k = marks === 1 ? 0 : Math.floor(i * (n - 1) / (marks - 1));
+      if (i === marks - 1) k = n - 1;        // 末位必须落在当前桶上（右端 = 现在）
+      var d = new Date((ser.start + k * b) * 1000);
+      var txt = byDay
+        ? pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+        : pad2(d.getHours()) + ':00';
+      cells.push('<span>' + txt + '</span>');
+    }
+    return '<div class="w-axis">' + cells.join('') + '</div>';
+  }
+
+  /** ⚠ 铁律：`<svg>` 里面禁止出现 HTML 元素（span/div/i/br…）。
+   *  HTML 解析器在 SVG 外来内容里遇到这些标签会「踹开」当前 svg —— 标签本身变成
+   *  文档里的 HTML 元素，后面所有 <path> 变成 xhtml:PATH（不渲染，也不报错）。
+   *  曾经的 P0：未覆盖段的斜纹 <span> 插在 <svg> 中间，导致切到比本地仓更宽的窗口时
+   *  波形整条消失（1.0.98→1.0.101 全中，且 headless 里 unknown=0 时正常，故 mock 测不出）。
+   *  → 斜纹现在是 svg 的兄弟节点（在 <svg> 之前，画在曲线下面）。 */
+  function waveHtml(ser) {
+    if (!ser || !ser.cnt) return '';
+    var vals = seriesVals(ser);
+    var empty = !(ser.peak > 0);
+    var note = ser.unknown > 0 ? ' · 仅覆盖 ' + Math.round((ser.cnt - ser.unknown) * ser.b / 3600) + ' 小时' : '';
+    var right = S.busy.usage ? '统计中…' : (empty ? '暂无用量' : ('峰值 ' + fmtTok(ser.peak)));
+    var unk = ser.unknown > 0
+      ? '<span class="w-unk" style="width:' + (ser.unknown / ser.cnt * 100).toFixed(1) + '%"></span>' : '';
+    var dot = empty ? '' : '<i class="w-dot" style="bottom:' + vals[vals.length - 1].toFixed(1) + '%"></i>';
+    return '<div class="wave" id="ov-wave">' +
+      '<div class="w-plot">' + unk +
+      '<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' +
+      '<defs>' +
+      '<linearGradient id="wgrad" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#4ade80" stop-opacity=".30"/>' +
+      '<stop offset=".62" stop-color="#22d3ee" stop-opacity=".10"/>' +
+      '<stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></linearGradient>' +
+      '<linearGradient id="wstroke" x1="0" y1="0" x2="1" y2="0">' +
+      '<stop offset="0" stop-color="#86efac"/><stop offset=".55" stop-color="#4ade80"/>' +
+      '<stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>' +
+      '<path class="w-base" d="M0 100H100"/>' +
+      '<path class="w-area" d="' + seriesPath(vals, true) + '"/>' +
+      '<path class="w-glow" d="' + seriesPath(vals, false) + '"/>' +
+      '<path class="w-line" d="' + seriesPath(vals, false) + '"/>' +
+      '</svg>' + dot +
+      '<i class="w-cursor"></i>' +
+      '</div>' + waveAxis(ser) +
+      '<div class="w-cap"><span class="w-l">' + (empty ? '暂无用量数据' : esc(ser.unit) + note) + '</span>' +
+      '<span class="w-r">' + esc(right) + '</span></div>' +
+      '</div>';
+  }
+
+  /** 帧推动：新数据/换范围时从上一帧插值到新一帧（420ms），不是硬跳。
+   *  整体 try/catch：波形只是装饰，任何异常都不许把 renderOverview 后半段（bindWave/事件）带死。 */
+  function paintWave(ser) {
+    try {
+      paintWaveInner(ser);
+    } catch (e) {
+      S.lastErr = 'wave:' + (e && e.message || e);
+    }
+  }
+
+  function paintWaveInner(ser) {
+    var host = document.getElementById('ov-wave');
+    if (!host || !ser) return;
+    var line = host.querySelector('.w-line');
+    var area = host.querySelector('.w-area');
+    var glow = host.querySelector('.w-glow');
+    var dot = host.querySelector('.w-dot');
+    if (!line || !area) return;
+    var target = seriesVals(ser);
+    var prev = resample(waveDisplayed, target.length);
+    if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = 0; }
+
+    function put(vals) {
+      var d = seriesPath(vals, false);
+      line.setAttribute('d', d);
+      if (glow) glow.setAttribute('d', d);
+      area.setAttribute('d', seriesPath(vals, true));
+      if (dot) dot.style.bottom = vals[vals.length - 1].toFixed(1) + '%';
+      waveDisplayed = vals.slice();
+    }
+
+    if (!prev || prev.length !== target.length) { put(target); return; }
+    var same = true;
+    for (var i = 0; i < target.length; i++) {
+      if (Math.abs(target[i] - prev[i]) > 0.15) { same = false; break; }
+    }
+    if (same) { put(target); return; }
+
+    var t0 = 0, dur = 420;
+    put(prev);
+    function frame(ts) {
+      if (!t0) t0 = ts;
+      var k = Math.min(1, (ts - t0) / dur), e = 1 - Math.pow(1 - k, 3), cur = [];
+      for (var j = 0; j < target.length; j++) cur.push(prev[j] + (target[j] - prev[j]) * e);
+      put(cur);
+      waveRaf = (k < 1) ? requestAnimationFrame(frame) : 0;
+    }
+    waveRaf = requestAnimationFrame(frame);
+  }
+
+  /** 手指横拖查某一桶：这段时间用了多少 token、几次请求（纵拖仍然滚页面） */
+  function bindWave(ser) {
+    var host = document.getElementById('ov-wave');
+    if (!host || !ser || !ser.cnt) return;
+    var plot = host.querySelector('.w-plot');
+    var cur = host.querySelector('.w-cursor');
+    var capL = host.querySelector('.w-l');
+    var capR = host.querySelector('.w-r');
+    if (!plot || !cur || !capL || !capR) return;
+    var baseL = capL.textContent, baseR = capR.textContent;
+    var n = ser.pts.length, dragging = false, restoreTimer = 0;
+
+    function show(clientX) {
+      var r = plot.getBoundingClientRect();
+      var f = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+      var i = Math.round(f * (n - 1));
+      var p = ser.pts[i];
+      cur.style.display = 'block';
+      cur.style.left = (i / Math.max(1, n - 1) * 100) + '%';
+      capL.textContent = bucketText(p.t0, ser.b);
+      capR.textContent = (p.unk ? '未覆盖' : fmtTok(p.tok) + ' · ' + fmtInt(p.req) + ' 次');
+    }
+    function reset() {
+      cur.style.display = 'none';
+      capL.textContent = baseL;
+      capR.textContent = baseR;
+    }
+    plot.addEventListener('pointerdown', function (e) {
+      dragging = true;
+      clearTimeout(restoreTimer);
+      show(e.clientX);
+      if (plot.setPointerCapture) { try { plot.setPointerCapture(e.pointerId); } catch (x) { } }
+    });
+    plot.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      if (e.cancelable) e.preventDefault();
+      show(e.clientX);
+    });
+    function stop() {
+      if (!dragging) return;
+      dragging = false;
+      clearTimeout(restoreTimer);
+      restoreTimer = setTimeout(reset, 1600);
+    }
+    plot.addEventListener('pointerup', stop);
+    plot.addEventListener('pointercancel', function () { dragging = false; reset(); });
+  }
+
   function cacheClearAll() {
     cacheMem = {};
     try {
@@ -484,8 +797,17 @@
   // 每次冷启动都判网关不等 → 整仓清空重扫）。
   var SECURE_KEYS = ['newapiBase', 'newapiToken', 'hubBase', 'hubPass'];
   var SECURE_ERR = '';      // 非空 = 设置页标红
+
+  // GitHub 图标（Octicons mark-github 16，viewBox 0 0 16 16）— 「关于」块右上角跳转项目仓库
+  function ghSvg() {
+    return '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">' +
+      '<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>';
+  }
   var secureProbed = null;  // null 未探测 / true 可用 / false 不可用
   var secureDead = false;   // 首次写入被拒后置位：此后一律回退明文，不反复重试
+  // key → 已确定落在 Keystore 里的值（开机读到的 + 写成功的）。saveCfg() 用它跳过未变的键，
+  // 避免「切范围 / 点排序」这类纯 UI 动作把 4 个凭证重新加密落盘（1.1.0）。
+  var secureWrote = {};
 
   function nativeBridge() { return window.NativeBridge || null; }
 
@@ -584,6 +906,7 @@
     errors: {},
     hubToken: '',
     hubAt: 0,
+    credIdx: null,
     abort: false,
     reqlog: []
   };
@@ -602,7 +925,7 @@
     // 这里必须同步：CFG 要在 boot() 之前定型。
     for (var si = 0; si < SECURE_KEYS.length; si++) {
       var sv = secureGet(SECURE_KEYS[si]);
-      if (sv !== null) c[SECURE_KEYS[si]] = sv;
+      if (sv !== null) { c[SECURE_KEYS[si]] = sv; secureWrote[SECURE_KEYS[si]] = sv; }
     }
     if (window.__BOOTSTRAP__) for (var k3 in window.__BOOTSTRAP__) c[k3] = window.__BOOTSTRAP__[k3];
     return c;
@@ -612,11 +935,17 @@
     // 4 个敏感键先写 Keystore：写成功就从明文块里摘掉（真机要求 localStorage 不留令牌）；
     // 不可用（浏览器 / 无桥）或写失败（白名单外 / 加密失败）则回退进明文块，保证配置不丢，
     // 失败原因由 secureSet() 记进 SECURE_ERR 在设置页标红。
+    //
+    // ⭐ 写放大收口（1.1.0）：排序 / 切范围 / 隐私开关这类纯 UI 动作也会走到这里，
+    // 而 4 个敏感键根本不可能变。secureWrote 记「已经落进 Keystore 的值」（开机 loadCfg 读到
+    // 的也算），值没变就整条跳过 —— 连一次 bridge 往返都不发，主线程零成本。
     var plain = plainCfg(CFG);
     for (var i = 0; i < SECURE_KEYS.length; i++) {
       var k = SECURE_KEYS[i];
       var v = CFG[k] == null ? '' : String(CFG[k]);
-      if (!secureSet(k, v)) plain[k] = v;
+      if (secureWrote[k] === v) continue;
+      if (secureSet(k, v)) secureWrote[k] = v;
+      else plain[k] = v;      // 写失败/无桥 → 明文回退，配置不丢
     }
     try { localStorage.setItem(LS_KEY, JSON.stringify(plain)); } catch (e) { }
   }
@@ -640,6 +969,32 @@
 
   function num(n) { n = Number(n); return isFinite(n) ? n : 0; }
   function fmtInt(n) { return Math.round(num(n)).toLocaleString('en-US'); }
+
+  /** 时间戳/时间串 → 毫秒。三种来源都要吃：
+   *  ① 数字秒/毫秒（`1792583370` / `1792583370123`）
+   *  ② ISO 串（`2026-10-24T13:00:00Z` / 带 +08:00 偏移）
+   *  ③ 后端常见的「空格分隔、无时区」串（`2026-10-24 13:00:00`）→ 按本地时间解释（ES 规范行为）
+   *  纯日期 `2026-10-24` 当本地日零点（它表示「哪一天」而不是「哪一刻」）。解析不了返回 null。 */
+  function tsOf(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') return isFinite(v) ? (v > 1e12 ? v : v * 1000) : null;
+    var s = String(v).trim();
+    if (/^\d+$/.test(s)) { var n = Number(s); return n > 1e12 ? n : n * 1000; }
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+    var t = Date.parse(s.replace(' ', 'T'));
+    if (!isFinite(t)) t = Date.parse(s);
+    return isFinite(t) ? t : null;
+  }
+
+  /** 毫秒 → 本地时区的 `YYYY-MM-DD`。
+   *  为什么不能直接切字符串前 10 位：服务端给的是 UTC，北京 10-24T23:30Z 实际是 10-25 07:30，
+   *  切出来的日期会整整早一天（1.0.x 的老 bug）。 */
+  function localDay(ms) {
+    if (ms == null || !isFinite(ms)) return '';
+    var d = new Date(ms);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
 
   function parseRate(st) {
     if (!st) return null;
@@ -797,7 +1152,7 @@
     if (S.reqlog.length > 40) S.reqlog.length = 40;
   }
 
-  function http(method, url, headers, body, timeout) {
+  function http(method, url, headers, body, timeout, noCache) {
     timeout = timeout || 45000;
     var isHttps = /^https:/i.test(url);
     var useBrowser;
@@ -805,17 +1160,22 @@
     else if (CFG.channel === 'native') useBrowser = false;
     else useBrowser = isHttps;
     if (useBrowser && typeof fetch === 'function') {
-      return browserHttp(method, url, headers, body, timeout);
+      return browserHttp(method, url, headers, body, timeout, noCache);
     }
-    return nativeHttp(method, url, headers, body, timeout);
+    return nativeHttp(method, url, headers, body, timeout, noCache);
   }
 
-  function browserHttp(method, url, headers, body, timeout) {
+  /** browserHttp：走 WebView 的 fetch。
+   *  noCache 必须落到 `cache:'no-store'` —— WebView 有 HTTP 缓存（`LOAD_DEFAULT`），
+   *  「手动刷新」若只绕过我们自己的 cacheMem 还不够，第二层是浏览器缓存：URL 一样就回旧的 200。
+   *  实测症状是「点刷新没反应，请求日志里连一条新记录都没有」。 */
+  function browserHttp(method, url, headers, body, timeout, noCache) {
     var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, timeout);
     var opt = { method: method, headers: headers || {}, credentials: 'omit' };
     if (ctrl) opt.signal = ctrl.signal;
     if (body) opt.body = body;
+    if (noCache) opt.cache = 'no-store';
     var t0 = Date.now();
     return fetch(url, opt).then(function (r) {
       return r.text().then(function (t) {
@@ -830,7 +1190,7 @@
     });
   }
 
-  function nativeHttp(method, url, headers, body, timeout) {
+  function nativeHttp(method, url, headers, body, timeout, noCache) {
     return new Promise(function (resolve, reject) {
       var id = 'r' + (++seq);
       var settled = false;
@@ -869,7 +1229,9 @@
       }
 
       delete pending[id];
-      fetch(url, { method: method, headers: headers || {}, body: body || undefined })
+      var fo = { method: method, headers: headers || {}, body: body || undefined };
+      if (noCache) fo.cache = 'no-store';       // 降级路径同样不许吃浏览器缓存
+      fetch(url, fo)
         .then(function (r) {
           return r.text().then(function (t) {
             logReq(method, url, r.status, 0);
@@ -920,7 +1282,7 @@
       'Accept': 'application/json'
     };
     var full = trimBase(CFG.newapiBase) + path;
-    return http(method || 'GET', full, h, body ? JSON.stringify(body) : '')
+    return http(method || 'GET', full, h, body ? JSON.stringify(body) : '', 0, !!noCache)
       .then(function (r) {
         var j = null;
         try { j = JSON.parse(r.body); } catch (e) { }
@@ -990,7 +1352,7 @@
       var verb = (method || 'GET').toUpperCase();
       var idempotent = verb === 'GET' || verb === 'HEAD';
       function attempt(n) {
-        return http(verb, url, h, body !== undefined ? JSON.stringify(body) : '').catch(function (e) {
+        return http(verb, url, h, body !== undefined ? JSON.stringify(body) : '', 0, !!noCache).catch(function (e) {
           if (!idempotent || n >= 2 || !/失败|超时|reset|ERR_/i.test(e.message)) throw e;
           return new Promise(function (res) { setTimeout(res, 900 * (n + 1)); }).then(function () { return attempt(n + 1); });
         });
@@ -1143,17 +1505,55 @@
     var s = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
     var n = new Date();
     if (d.getFullYear() !== n.getFullYear() || d.getMonth() !== n.getMonth() || d.getDate() !== n.getDate()) {
-      s = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + s;
+      // 跨天行：带日期就够定位了，秒省掉 3 个字符 —— 窄屏下这 17px 正好让第二行塞得下账号·积分胶囊
+      s = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
     }
     return s;
   }
 
-  function effortTag(eff) {
-    var e = String(eff || '').trim();
-    if (!e) return '';
-    var k = e.toLowerCase();
-    var label = (k === 'none' || k === 'null' || k === 'off') ? '关' : esc(e);
-    return ' · <span class="eff e-' + esc(k.replace(/[^a-z0-9_-]/g, '')) + '">' + label + '</span>';
+  function credKey(mn, pt, ct) {
+    var m = String(mn || '');
+    var realm = m.indexOf('global:') === 0 ? 'intl' : 'cn';
+    m = m.replace(/^(cn|global):/, '');
+    return realm + '|' + m + '|' + num(pt) + '|' + num(ct);
+  }
+
+  function acctName(uid) {
+    if (!uid) return '';
+    var accs = (S.wb && S.wb.accounts && S.wb.accounts.accounts) || [];
+    for (var i = 0; i < accs.length; i++) {
+      if (accs[i] && accs[i].uid === uid) return accs[i].nickname || '';
+    }
+    return '';
+  }
+
+  /** 账号名太长只留几位：8 字以内原样，超过留「前 4 … 后 3」——
+   *  积分胶囊要短，且账号名多带哈希/手机号后缀，头尾比正中间有用 */
+  function shortAcct(nm) {
+    var s2 = String(nm || '');
+    if (s2.length <= 8) return s2;
+    return s2.slice(0, 4) + '…' + s2.slice(-3);
+  }
+
+  function fmtCr(v) {
+    v = num(v);
+    if (v >= 1000) return fmtInt(v);
+    return v.toFixed(2);
+  }
+
+  function loadCredIdx() {
+    if (!trimBase(CFG.hubBase)) return Promise.resolve();
+    return hubRaw('/usage/recent?realm=all&limit=100', 'GET', undefined, false, true).then(function (d) {
+      var idx = {};
+      ((d && d.rows) || []).forEach(function (r) {
+        if (!r) return;
+        var realm = String(r.realm || 'cn') === 'intl' ? 'intl' : 'cn';
+        idx[realm + '|' + String(r.model || '') + '|' + num(r.prompt_tokens) + '|' + num(r.completion_tokens)] =
+          { cr: num(r.credit), uid: r.account || '' };
+      });
+      S.credIdx = idx;
+      if (S.tab === 'overview') renderOverview();
+    }).catch(function () { });
   }
 
   function speedText(r) {
@@ -1287,20 +1687,25 @@
     var cm0 = wb0 ? creditMap(wb0) : { today: {} };
     var credSum = 0, credHas = false;
     for (var ck0 in cm0.today) { credSum += num(cm0.today[ck0]); credHas = true; }
+    var es0 = expSoon(wb0);
+    var ser = show ? rawSeries(show.range) : null;
 
     html += '<div class="hero">' +
       '<div class="hero-top"><div>' +
       '<div class="hero-l">' + (show ? esc(show.label) : '用量') + ' Token' +
       (show && show.capped ? '（前 ' + show.pages + ' 页）' : '') + '</div>' +
       '<div class="hero-v mono">' + (show ? fmtTok(show.total) : (live ? '<span class="spin"></span>' : '—')) + '</div>' +
-      '</div><button class="pill info" data-act="ov-range" title="点一下切换 今天 / 24 小时" ' +
+      '</div><button class="pill info" data-act="ov-range" title="点一下切换 今天 → 24 小时 → 7 天" ' +
       'style="border:0;font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:4px">' +
       esc(RANGE_NAME[(show && show.range) || CFG.range] || '24 小时') +
       '<span style="opacity:.65;font-size:11px">⇄</span></button></div>' +
+      waveHtml(ser) +
       '<div class="hero-grid">' +
       '<div class="mini"><div class="k">请求</div><div class="v mono">' + (show ? fmtInt(show.req) : '—') + '</div></div>' +
-      '<div class="mini"><div class="k">令牌 Key 数</div><div class="v mono">' + (S.tokens ? S.tokens.length : '—') + '</div></div>' +
       '<div class="mini"><div class="k">今日积分</div><div class="v mono cred">' + (credHas ? fmtCred(credSum) : '—') + '</div></div>' +
+      (es0
+        ? '<div class="mini"><div class="k">' + esc(expDay(es0.day)) + ' 到期</div><div class="v mono warn">' + fmtCred(es0.sum) + '</div></div>'
+        : '<div class="mini"><div class="k">积分到期</div><div class="v mono">—</div></div>') +
       '</div></div>';
 
     var keys = show ? Object.keys(show.byKey).map(function (k) {
@@ -1334,9 +1739,24 @@
       html += '<div class="empty">暂无请求记录</div>';
     } else {
       recent.slice(0, RECENT_MAX).forEach(function (r) {
+        // 两行制：① 模型名 + 右端 token 数  ② key·时间 + 右端琥珀胶囊（账号·积分）
+        // 速度（t/s + 首字）下沉成 token 数下方的小字：407px 宽度放不下「key·时间·速度 + 账号·积分」，
+        // 硬挤的话省略号会切在时间/积分的数字上（本轮实测 15/20 行被切）。
+        // 胶囊 flex:0 0 auto ⇒ 永不截断；可让位的只有 key 名（省略号只切 key，不切数字）。
+        var hit = S.credIdx && S.credIdx[credKey(r.model_name, r.prompt_tokens, r.completion_tokens)];
+        var nm = hit ? acctName(hit.uid) : '';
+        var spd = speedText(r);
         html += '<div class="row"><div class="grow"><div class="name">' + esc(r.model_name || '—') + '</div>' +
-          '<div class="meta">' + pv(r.token_name || '—') + ' · ' + clockOf(r.created_at) + ' · ' + speedText(r) + effortTag(r.effort) + '</div></div>' +
-          '<div class="val mono">' + fmtTok(num(r.prompt_tokens) + num(r.completion_tokens)) + '</div></div>';
+          '<div class="mline"><span class="mt"><span class="mkey">' + pv(r.token_name || '—') + '</span>' +
+          '<span class="msep">·</span><span class="mtime">' + clockOf(r.created_at) + '</span></span>' +
+          (hit ? '<span class="cr">' +
+            (nm ? '<span class="cr-n">' + pv(shortAcct(nm), true) + '</span><span class="cr-s">·</span>' : '') +
+            '<span class="cr-v">' + fmtCr(hit.cr) + ' 积分</span></span>' : '') +
+          '</div></div>' +
+          // 只给 token 数用等宽；下面的速度小字用比例字体（等宽把「35 t/s 0.7 s」撑宽 24px，
+          // 那 24px 直接决定第二行的 key/时间够不够）
+          '<div class="val"><span class="mono">' + fmtTok(num(r.prompt_tokens) + num(r.completion_tokens)) +
+          '</span>' + (spd && spd !== '—' ? '<small>' + spd + '</small>' : '') + '</div></div>';
       });
     }
     html += '</div>';
@@ -1366,6 +1786,9 @@
     if (S.errors.usage) html += errBox(S.errors.usage);
 
     el.innerHTML = html;
+    // 波形必须在插入 DOM 之后再画：先落上一帧形状，再插值到新一帧（帧推动）
+    paintWave(ser);
+    bindWave(ser);
   }
 
   function progressPct(agg) {
@@ -2087,6 +2510,120 @@
     return (d / 86400).toFixed(1) + ' 天';
   }
 
+  var LIVE_SEC = 20;
+  var LIVE_POLL = 2000;
+  var liveMap = {};
+  var liveTimer = null;
+
+  function pollLive(force) {
+    if (!force && S.tab !== 'wb') return;
+    // 切后台/锁屏后不再打点（1.1.0）：WebView 的 setInterval 在后台仍会跑，
+    // 2s 一次的 /usage/recent 纯属白烧流量与电。壳内还有 pauseTimers 兜底，两条互补。
+    if (!force && document.hidden) return;
+    hubRaw('/usage/recent?realm=all&limit=100', 'GET', undefined, false, true).then(function (d) {
+      var now = Date.now() / 1000, m = {};
+      ((d && d.rows) || []).forEach(function (r) {
+        var u = r && r.account;
+        if (!u) return;
+        var endAge = now - (num(r.at) + num(r.elapsed_ms) / 1000);
+        if (endAge < -300) return;
+        if (!m[u] || endAge < m[u].age) m[u] = { age: endAge, run: endAge <= 0 };
+      });
+      liveMap = m;
+      paintLive();
+    }).catch(function () { });
+  }
+
+  function paintLive() {
+    var nodes = document.querySelectorAll('.view[data-view="wb"] .acc[data-uid]');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i], u = n.getAttribute('data-uid');
+      var st = liveMap[u];
+      var on = !!st && (st.run || st.age <= LIVE_SEC);
+      var cls = 'live';
+      var dot = n.querySelector('.name > .live');
+      if (on && !dot) {
+        var nm = n.querySelector('.name');
+        if (!nm) continue;
+        var d = document.createElement('span');
+        d.className = cls;
+        d.title = st.run ? '正在请求中' : '最近 ' + Math.round(st.age) + ' 秒内有请求';
+        var ch = nm.querySelector('.caret-hit');
+        if (ch && ch.nextSibling) nm.insertBefore(d, ch.nextSibling);
+        else nm.appendChild(d);
+      } else if (!on && dot) {
+        dot.parentNode.removeChild(dot);
+      } else if (on && dot) {
+        if (dot.className !== cls) dot.className = cls;
+        dot.title = st.run ? '正在请求中' : '最近 ' + Math.round(st.age) + ' 秒内有请求';
+      }
+    }
+  }
+
+  function startLive() {
+    stopLive();
+    pollLive();
+    liveTimer = setInterval(pollLive, LIVE_POLL);
+  }
+
+  function stopLive() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  }
+
+  function credExp(a, limit) {
+    var pk = ((a && a.credits) || {}).packages || [];
+    var by = {}, order = [];
+    for (var i = 0; i < pk.length; i++) {
+      var p = pk[i];
+      if (!p || p.no_expiry || p.is_expired) continue;
+      var rem = num(p.remain);
+      if (rem <= 0) continue;
+      var et = p.expire_time || p.cycle_end_time || '';
+      var ts = tsOf(et);
+      if (ts == null) continue;
+      var day = localDay(ts);
+      if (!by[day]) { by[day] = { day: day, sum: 0, n: 0 }; order.push(day); }
+      by[day].sum += rem;
+      by[day].n += 1;
+    }
+    order.sort();
+    var lim = limit || 5;
+    var out = order.slice(0, lim).map(function (d) { return by[d]; });
+    var restN = Math.max(0, order.length - lim);
+    var restSum = 0;
+    for (var j = lim; j < order.length; j++) restSum += by[order[j]].sum;
+    return { days: out, restN: restN, restSum: restSum, total: order.length };
+  }
+
+  function expDay(day) {
+    var s = String(day || '');
+    if (s.length < 10) return s;
+    var y = String(new Date(Date.now()).getFullYear());
+    return s.slice(0, 4) === y ? s.slice(5) : s;
+  }
+
+  function expSoon(wb) {
+    var accs = (wb && wb.accounts && wb.accounts.accounts) || [];
+    var by = {};
+    for (var i = 0; i < accs.length; i++) {
+      var pk = ((accs[i] && accs[i].credits) || {}).packages || [];
+      for (var j = 0; j < pk.length; j++) {
+        var p = pk[j];
+        if (!p || p.no_expiry || p.is_expired) continue;
+        var rem = num(p.remain);
+        if (rem <= 0) continue;
+        var et = p.expire_time || p.cycle_end_time || '';
+        var ts = tsOf(et);
+        if (ts == null) continue;
+        var day = localDay(ts);
+        by[day] = num(by[day]) + rem;
+      }
+    }
+    var days = Object.keys(by).sort();
+    if (!days.length) return null;
+    return { day: days[0], sum: by[days[0]] };
+  }
+
   function accIssues(a) {
     var out = [], seen = {};
     var now = Math.floor(Date.now() / 1000);
@@ -2183,6 +2720,7 @@
     accs.forEach(function (a) {
       var c = a.credits || {};
       var dm = accIssues(a);
+      var ex = credExp(a, 5);
       var open = !!(S.accOpen && S.accOpen[a.uid]);
       var badges = '';
       if (a.inCooldown) badges += '<span class="pill warn">冷却中</span>';
@@ -2192,31 +2730,44 @@
       var ckt = ckText(a, ck);
       var today = num(credOf(a));
       var w = Math.max(2, Math.round(today / maxToday * 100));
-      html += '<div class="acc' + (a.enabled ? '' : ' off') + '">' +
+      html += '<div class="acc' + (a.enabled ? '' : ' off') + '" data-uid="' + esc(a.uid) + '">' +
         '<div class="acc-main">' +
         '<div class="name">' +
-        (dm.length ? '<span class="caret-hit" data-act="acc-expand" data-uid="' + esc(a.uid) + '">' +
+        ((dm.length || ex.days.length) ? '<span class="caret-hit" data-act="acc-expand" data-uid="' + esc(a.uid) + '">' +
           '<i class="caret' + (open ? ' open' : '') + '"></i></span>' : '') +
         pv(a.nickname || a.uid.slice(0, 8), true) +
         '<span class="pill ' + (a.realm === 'cn' ? 'info' : 'mute') + '">' + esc(a.realm || '?') + '</span>' + badges + '</div>' +
         '<div class="bar"><i style="width:' + w + '%"></i></div>' +
         '<div class="meta">剩余 ' + fmtQty(c.remain) + ' · 到期 ' +
-        (c.earliest_expiring && c.earliest_expiring.cycle_end_time ? esc(String(c.earliest_expiring.cycle_end_time).slice(5, 10)) : '—') +
+        (function () {
+          // 到期日走本地时区（原来直接切字符串前 10 位 → UTC 会差一天）
+          var d0 = localDay(tsOf(c.earliest_expiring && c.earliest_expiring.cycle_end_time));
+          return d0 ? esc(d0.slice(5)) : '—';
+        })() +
         ' · <span title="' + esc(ckt.title) + '">' + ckt.text + '</span>' +
         '</div>' +
-        (dm.length && open ? '<div class="acc-more"><div class="acc-more-h">' +
-          (dm.filter(function (x) { return x.kind === 'cool'; }).length
-            ? '限流冷却 ' + dm.filter(function (x) { return x.kind === 'cool'; }).length + ' 个模型' : '') +
-          (dm.filter(function (x) { return x.kind === 'off'; }).length
-            ? (dm.filter(function (x) { return x.kind === 'cool'; }).length ? ' · ' : '') +
-              '手动禁用 ' + dm.filter(function (x) { return x.kind === 'off'; }).length + ' 个' : '') +
-          '</div>' +
-          dm.map(function (x) {
-            var rt = x.reset || resetOf(wb, a.uid, x.model);
-            return '<div class="dm-row"><span class="dm-name">' + esc(x.model) + '</span>' +
-              (x.kind === 'cool' ? '<span class="dm-tag cool">冷却</span>' : '<span class="dm-tag off">禁用</span>') +
-              '<span class="dm-time">' + (rt ? '恢复 <b>' + fmtShort(rt) + '</b>' : '恢复 —') + '</span></div>';
-          }).join('') + '</div>' : '') +
+        ((dm.length || ex.days.length) && open ? '<div class="acc-more">' +
+          (ex.days.length ? '<div class="acc-more-h">积分到期<span class="hsub">最近 ' + ex.days.length + ' 个日期</span></div>' +
+            ex.days.map(function (x, i) {
+              return '<div class="exp-i' + (i === 0 ? ' urgent' : '') + '">' +
+                '<span class="exp-d">' + expDay(x.day) + '</span>' +
+                '<span class="exp-n">' + x.n + ' 个包</span>' +
+                '<span class="exp-v">' + fmtCred(x.sum) + '</span></div>';
+            }).join('') +
+            (ex.restN ? '<div class="exp-rest">另有 ' + ex.restN + ' 个日期 · ' + fmtCred(ex.restSum) + '</div>' : '') : '') +
+          (dm.length ? '<div class="acc-more-h"' + (ex.days.length ? ' style="margin-top:10px"' : '') + '>' +
+            (dm.filter(function (x) { return x.kind === 'cool'; }).length
+              ? '限流冷却 ' + dm.filter(function (x) { return x.kind === 'cool'; }).length + ' 个模型' : '') +
+            (dm.filter(function (x) { return x.kind === 'off'; }).length
+              ? (dm.filter(function (x) { return x.kind === 'cool'; }).length ? ' · ' : '') +
+                '手动禁用 ' + dm.filter(function (x) { return x.kind === 'off'; }).length + ' 个' : '') +
+            '</div>' +
+            dm.map(function (x) {
+              var rt = x.reset || resetOf(wb, a.uid, x.model);
+              return '<div class="dm-row"><span class="dm-name">' + esc(x.model) + '</span>' +
+                (x.kind === 'cool' ? '<span class="dm-tag cool">冷却</span>' : '<span class="dm-tag off">禁用</span>') +
+                '<span class="dm-time">' + (rt ? '恢复 <b>' + fmtShort(rt) + '</b>' : '恢复 —') + '</span></div>';
+            }).join('') : '') + '</div>' : '') +
         '</div>' +
         '<div class="acc-end">' +
         '<div class="val mono">' + (credOf(a) == null ? '—' : today.toFixed(2)) + '<small>今日消耗</small></div>' +
@@ -2330,6 +2881,7 @@
     var keepTop = el.scrollTop;
     el.innerHTML = html;
     if (keepTop) el.scrollTop = keepTop;
+    paintLive();
   }
 
   function baseKind(u) {
@@ -2433,6 +2985,9 @@
     return !!(window.NativeBridge && window.NativeBridge.downloadApk);
   }
 
+  // 设置项红点：GitHub 有新版本时亮起
+  function hasUpd() { return UPD.state === 'new'; }
+
   // Java 侧下完/失败后回调这里（见 MainActivity.startApkDownload）
   window.__onApk = function (r) {
     if (!r) return;
@@ -2459,6 +3014,9 @@
     if (btn) { btn.disabled = UPD.state === 'checking'; btn.textContent = UPD.state === 'checking' ? '检查中…' : '检查更新'; }
     var cp = $('#f-updcopy');
     if (cp) cp.style.display = (UPD.state === 'new' && UPD.url) ? '' : 'none';
+    // 设置 tab 红点：有新版本时亮起
+    var updDot = document.getElementById('upd-dot');
+    if (updDot) updDot.style.display = hasUpd() ? 'block' : 'none';
     // 应用内更新：能下载就露「下载并安装」，网页版只能复制地址
     var dl = $('#f-upddl');
     if (dl) dl.style.display = (UPD.state === 'new' && UPD.apkUrl && canInstallApk()) ? '' : 'none';
@@ -2500,9 +3058,15 @@
     // 同一自然日只查一次（手动点「检查更新」传 force:true 绕过）。
     // 失败也写标记：GitHub 未认证配额 60 次/小时/IP，弱网用户每次冷启都打一次会被打穿。
     if (!opts.force) {
-      try { if (localStorage.getItem(UPD_DAY) === today) { updPaint(); return Promise.resolve(UPD); } } catch (e) { }
+      // 6 小时窗口：UPD_AT 记的是「上次检查时间戳」，成功失败都写（见 mark()），
+      // 所以弱网反复失败也会被限住，不会每次冷启都打 GitHub。
+      try {
+        var lastAt = Number(localStorage.getItem(UPD_AT)) || 0;
+        if (lastAt && (Date.now() - lastAt) < UPD_MAXAGE) { updPaint(); return Promise.resolve(UPD); }
+      } catch (e) { }
     }
-    function mark() { try { localStorage.setItem(UPD_DAY, today); } catch (e) { } }
+    // UPD_DAY 保留兼容旧数据（「今天查过」显示用），真正限频用 UPD_AT
+    function mark() { try { localStorage.setItem(UPD_AT, String(Date.now())); } catch (e) { } }
     UPD.state = 'checking'; UPD.cur = cur;
     updPaint();
     function tryAt(i) {
@@ -2535,7 +3099,7 @@
   }
 
   function autoUpd() {
-    // 三重门：真 App 壳内才发请求（有桥 + file://）、拿得到真实版本、同日没查过（后者在 checkUpdate 里）。
+    // 三重门：真 App 壳内才发请求（有桥 + file://）、拿得到真实版本、6 小时窗口内没查过（后者在 checkUpdate 里）。
     // file:// 这一条不是多余：harness 和桌面调试页都用 http 打开本页，很多用例会桩 NativeBridge，
     // 只判 !!NativeBridge 会让每次冷启动都往 GitHub 打一次 —— 测试不该有真网出口。
     if (!inShell()) return Promise.resolve(UPD);
@@ -2622,7 +3186,9 @@
       }).join('') + '</select></div>' +
       '</div>';
 
-    html += '<div class="card"><div class="card-h"><div class="card-t">关于</div><span class="pill mute">v' + esc(info.version) + '</span></div>' +
+    html += '<div class="card"><div class="card-h"><div class="card-t">关于</div><span class="pill mute">v' + esc(info.version) + '</span>' +
+      '<a id="ghlink" href="https://github.com/jianji112/token-desk" target="_blank" rel="noopener" ' +
+      'style="margin-left:auto;display:inline-flex;align-items:center;color:var(--dim-2)" aria-label="GitHub 项目">' + ghSvg() + '</a></div>' +
       '<div class="kv"><span class="k">运行环境</span><span class="v">Android SDK ' + esc(info.sdk) + ' · ' + esc(info.model) + '</span></div>' +
       '<div class="kv"><span class="k">请求通道</span><span class="v">' + channelLabel(CFG.channel) + ' · ' +
       (window.NativeBridge && window.NativeBridge.http ? '原生桥可用' : '无原生桥（纯浏览器）') + '</span></div>' +
@@ -2917,6 +3483,7 @@
         } catch (e) { }
         SECURE_ERR = '';
         secureDead = false;
+        secureWrote = {};      // Keystore 已清空 → 「已落盘的值」全部作废，否则清空后不会再写回
         cacheClearAll();
         rawReset();
         try {
@@ -2972,7 +3539,7 @@
     if (name === 'overview') renderOverview();
     if (name === 'tokens') { renderTokens(); }
     if (name === 'usage') { renderUsage(); }
-    if (name === 'wb') renderWB();
+    if (name === 'wb') { renderWB(); startLive(); } else { stopLive(); }
     if (name === 'settings') renderSettings();
     updateSub();
   }
@@ -2989,11 +3556,16 @@
   }
 
   function toggleOverviewRange() {
-    var next = (CFG.range === 'today') ? '24h' : 'today';
+    // 三档循环：今天 → 24 小时 → 7 天。7 天首次要补扫（scanWindow 自动把翻页上限抬到 260），
+    // 所以先用本地仓立刻把图换掉，网络补齐后再刷一遍 —— 换范围不该先白屏。
+    var seq = ['today', '24h', '7d'];
+    var next = seq[(seq.indexOf(CFG.range) + 1) % seq.length];
+    var tip = next === '24h' ? '（滚动 24 小时）' : (next === '7d' ? '（首次会补扫 7 天）' : '（今天 00:00 起）');
     CFG.range = next;
     saveCfg();
-    toast('已切到「' + RANGE_NAME[next] + '」' + (next === '24h' ? '（滚动 24 小时）' : '（今天 00:00 起）'), 'ok');
+    S.usage = rawAggFor(next);
     renderOverview();
+    toast('已切到「' + RANGE_NAME[next] + '」' + tip, 'ok');
     loadUsage(next, false);
   }
 
@@ -3110,7 +3682,7 @@
     }
 
     function batch() {
-      if (S.abort || sc.page >= maxPages) return Promise.resolve();
+      if (S.abort || sc.exhausted || sc.page >= maxPages) return Promise.resolve();
       if (scEnough()) return Promise.resolve();
       var pages = [];
       for (var i = 1; i <= 3 && (sc.page + i) <= maxPages; i++) pages.push(sc.page + i);
@@ -3145,7 +3717,10 @@
           if (added < items.length) sc.dirty = true;   // 本页有条目被去重 → 发生了 offset 重叠
           sc.got += added;
           sc.page = r.pg;
-          if (!items.length) { sc.page = maxPages + 1; break; }
+          // 扫到空页 = 这个窗口的数据到底了；但这不等于「撞页数上限」，也不能反推
+          // coverFrom（total 未知时保守处理，见 F6）。原来借用 `page = maxPages + 1`
+          // 表示结束，副作用是把「扫完了」误标成 capped —— 两种语义必须分开。
+          if (!items.length) { sc.exhausted = true; break; }
         }
         rawMeta();
         rawSave();
@@ -3156,7 +3731,7 @@
           if (S.tab === 'usage') renderUsage();
         }
         if (scEnough()) return;
-        if (sc.page >= maxPages) return;
+        if (sc.exhausted || sc.page >= maxPages) return;
         if (quiet) return new Promise(function (r2) { setTimeout(r2, 150); }).then(batch);
         return batch();
       });
@@ -3167,10 +3742,18 @@
       if (full) {
         rawMarkCovered(sc.since);
         st.scan = null;
+      } else if (sc.exhausted) {
+        // 扫到空页但 total 未知：不声明覆盖（保守），只把扫描状态收掉，避免每 tick 重扫空页
+        st.scan = null;
       } else if (sc.page >= maxPages) {
         // 翻到页数上限还没扫完：标 capped 并收尾（原实现把 sc 留在 st.scan 里，
         // 每次 autoTick 都会重新进来、batch() 首行直接 return，零请求空转到天荒地老）
+        //
+        // scanDirty：本窗口扫描期间是否发生过 offset 重叠（头部插入新行 → 后续页重放前面的
+        // 内容，可能漏行）。只有「连续翻页、无重叠」时，最老那一行才可信地代表覆盖起点
+        // （rawMeta 用它推 coverFrom）；脏了就一律不许推，保持原来的保守语义（F9）。
         st.capped = true;
+        st.scanDirty = !!sc.dirty;
         st.scan = null;
       }
       rawMeta();
@@ -3270,6 +3853,7 @@
       // busy 只由置位者清。delta 全程不置 busy.usage（上面 busy=true 就直接返回了），
       // 在这里写 false 只会清掉别人的标记：并发的全量扫描（loadUsage/ensureWindow
       // 置的「统计中」）会被提前抹掉，UI 报已完成而扫描其实还在跑
+      if (CFG.hubPass && S.tab === 'overview') loadCredIdx();
       if (S.tab === 'overview') renderOverview();
       if (S.tab === 'usage') renderUsage();
       if (S.tab === 'tokens') renderTokens();
@@ -3327,11 +3911,11 @@
       loadOverview(true);
       loadUsage(CFG.range, !S.busy.usage);
     }
-    if (CFG.hubPass) loadWB(true);
+    if (CFG.hubPass) { loadWB(true); loadCredIdx(); }
   }
 
   function refreshCurrent() {
-    if (S.tab === 'overview') { loadOverview(true); loadUsage(CFG.range, false); loadWB(false); }
+    if (S.tab === 'overview') { loadOverview(true); loadUsage(CFG.range, false); loadWB(false); loadCredIdx(); }
     else if (S.tab === 'tokens') { loadOverview(true); loadUsage(CFG.range, false); }
     else if (S.tab === 'usage') { loadUsage(CFG.range, true); }
     else if (S.tab === 'wb') { S.hubToken = ''; loadWB(true); }
@@ -3394,7 +3978,10 @@
     // autoUpd 自己有三重门（壳内/file://、有真实版本、同日没查过），网页版与 harness 里是空转。
     setTimeout(autoUpd, 3000);
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && parseInt(CFG.autoRefresh, 10) > 0) {
+      // 切后台：停掉实时打点（1.1.0）。回来时若还在账号池页就重启，别留一个空转的 interval。
+      if (document.hidden) { stopLive(); return; }
+      if (S.tab === 'wb') startLive();
+      if (parseInt(CFG.autoRefresh, 10) > 0) {
         if (CFG.newapiToken) { loadOverview(false); loadUsage(CFG.range, false); }
         if (CFG.hubPass) loadWB(false);
       }
@@ -3492,11 +4079,20 @@
       return;
     }
     refreshAll();
+    pollLive(true);
     backfillTiming();
   }
 
   window.__app = {
     state: S, cfg: function () { return CFG; }, showTab: showTab, refreshAll: refreshAll,
+    live: function (m) {
+      if (m) {
+        var n = {};
+        for (var k in m) n[k] = (typeof m[k] === 'number') ? { age: m[k], run: false } : m[k];
+        liveMap = n; paintLive();
+      }
+      return liveMap;
+    },
     loadOverview: loadOverview, loadUsage: loadUsage, loadWB: loadWB,
     refreshUsageDelta: refreshUsageDelta, autoTick: autoTick, startAutoRefresh: startAutoRefresh,
     raw: function () { var st = rawLoad(); return { at: st.at, since: st.since, newest: st.newest, pages: st.pages, complete: st.complete, coverFrom: st.coverFrom == null ? null : st.coverFrom, rows: st.rows.length, degraded: rawDegraded, idb: idbOK }; },
@@ -3547,7 +4143,15 @@
     updRestore: updRestore, updForget: function () { UPD = { state: 'idle', cur: '', tag: '', url: '', notes: '', at: 0 }; },
     updStore: function () { try { return JSON.parse(localStorage.getItem(UPD_LAST) || 'null'); } catch (e) { return null; } },
     upd: function () { return { state: UPD.state, cur: UPD.cur, tag: UPD.tag, url: UPD.url, notes: updNotes(), at: UPD.at, atText: updAtText() }; },
-    saveCfg: saveCfg
+    saveCfg: saveCfg,
+    // ── 1.1.0 新增测试钩子 ──
+    // 实时打点（U4-1）：F34 用它验证「document.hidden 时不发 /usage/recent」
+    pollLive: pollLive, startLive: startLive, stopLive: stopLive,
+    liveTimer: function () { return !!liveTimer; },
+    // 时间解析（U7-3）：F35 直接钉「UTC 串 → 本地日期」不差一天
+    tsOf: tsOf, localDay: localDay,
+    // 凭证落盘账本（U4-3）：F36 用它看「值没变时是否真的没调 bridge」
+    secureWrote: function () { return JSON.parse(JSON.stringify(secureWrote)); }
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

@@ -23,13 +23,16 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, openSync, closeSync, writeSync, statSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');            // = public/
 const ASSETS = path.join(ROOT, 'app', 'assets');
-// Chrome profile 属于一次性产物，放缓存目录，绝不落进仓库
-const SCRATCH = process.env.BH_AGENT_WORKSPACE || path.join(process.env.HOME || '/tmp', '.hermes', 'cache', 'scratch');
+// Chrome profile 属于一次性产物，放缓存目录，绝不落进仓库。
+// fallback 用系统临时目录而非 $HOME/.hermes/...（那是作者本机工具链的目录约定，
+// 写进公开仓库会连带暴露用户名/工具路径，谁跑都一样落地即可）。
+const SCRATCH = process.env.BH_AGENT_WORKSPACE || process.env.TMPDIR || os.tmpdir();
 const CHROME_PROFILE = path.join(SCRATCH, 'td-test-chrome');
 
 /** 冻结时钟：所有时间基准都从这里算，禁止用真实时间（否则 CI 上 F2/F10/F11 必然抖） */
@@ -142,6 +145,7 @@ function findOtherHarness() {
 const state = {
   gate: true, // true = /api/log/ 一律返回空（用于让 boot 阶段安静），fixture 开始前打开
   log: [], // [{p,size,start,end,t}]
+  hits: [], // 全站请求流水 [{p,t}]（F34 断言「后台零请求」用）
   pages: new Map(), // page -> {items,total?,status?,body?,delay?}
   dynamic: null, // (page, req) => {items,total?} | undefined
   onRespond: null, // (page, req) => void  （用于 F9 在 p1 之后插入新行）
@@ -150,6 +154,7 @@ const state = {
 function mockReset() {
   state.gate = true;
   state.log = [];
+  state.hits = [];
   state.pages = new Map();
   state.dynamic = null;
   state.onRespond = null;
@@ -177,6 +182,9 @@ function serveStatic(res, pathname) {
 const server = createServer(async (req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
   const p = u.pathname;
+  // 全站请求流水（含 hub 的 /panel/login、/usage/recent）：F34 用它证明「切后台真的不发请求」。
+  // 只记路径与时间，不参与任何业务分支。
+  state.hits.push({ p: p, t: Date.now() });
 
   if (p.startsWith('/api/log/')) {
     const rec = {
@@ -1374,14 +1382,13 @@ const fixtures = [
             return Promise.resolve({ tag_name: 'v1.0.72', html_url: 'https://example.invalid/r', body: '' });
           } });
         };
-        function p2(n) { return n < 10 ? '0' + n : '' + n; }
-        var d = new Date(Date.now());   // 冻结时钟
-        localStorage.setItem('tokendesk.updchecked.v1', d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()));
+        // 限频窗口改用 UPD_AT（时间戳，成功失败都记）：预置「6 小时内刚查过」
+        localStorage.setItem('tokendesk.updat.v1', String(Date.now()));
       })();`,
     setup() { state.dynamic = () => ({ items: [], total: 0 }); },
     run: `(async () => {
       var URLS = ['https://example.invalid/releases/latest'];
-      var u1 = await __app.checkUpdate({ cur: '1.0.72', urls: URLS });   // 未 force：同日已查 → 直接返回
+      var u1 = await __app.checkUpdate({ cur: '1.0.72', urls: URLS });   // 未 force：6 小时内查过 → 直接返回
       var st1 = u1.state, n1 = window.__UPDCALLS.length;
       var u2 = await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });  // 手动查绕过标记
       var st2 = u2.state, n2 = window.__UPDCALLS.length;
@@ -1424,10 +1431,10 @@ const fixtures = [
     run: `(async () => {
       var URLS = ['https://example.invalid/releases/latest'];
       var n0 = window.__UPDCALLS.length;
-      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 今天第一次：查
+      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 窗口外第一次：查
       var n1 = window.__UPDCALLS.length;
-      var mark = localStorage.getItem('tokendesk.updchecked.v1');
-      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 同日第二次：不查
+      var mark = localStorage.getItem('tokendesk.updat.v1');        // 限频时间戳（UPD_AT）
+      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 6 小时窗口内第二次：不查
       var n2 = window.__UPDCALLS.length;
       await __app.autoUpd();                                          // 启动那次：http 页面 → 协议门
       var n3 = window.__UPDCALLS.length;
@@ -1441,7 +1448,7 @@ const fixtures = [
       return [
         eq('起手不该有请求（老用例遗留的请求会被这里抓到）', out.n0, 0),
         eq('今天第一次查 → 恰好一次请求', out.n1, 1),
-        eq('「今天」标记必须真的写下来（跨冷启动生效的前提）', out.mark, out.today),
+        truthy('限频时间戳必须真的写下来（跨冷启动生效的前提）', !!out.mark && isFinite(Number(out.mark)) && Number(out.mark) > 0),
         eq('同日第二次查 → 不再请求', out.n2, 1),
         eq('harness 是 http 页面：autoUpd 必须被协议门挡住、零请求', out.n3, 1),
         eq('前提确认：本页协议不是 file:', out.proto, 'http:'),
@@ -2015,6 +2022,317 @@ const fixtures = [
         truthy('飞行中 pending 必须登记（p0+1）', out.mid >= out.p0 + 1),
         truthy('超时后 pending 必须回到调用前（不泄漏回调）', out.pend <= out.p0),
         eq('超时时间必须贴合传入的 400ms（不得拖到 45s）', out.ms < 1500, true),
+      ];
+    },
+  },
+
+  // ── 波形 P0（1.0.102）：`<svg>` 里出现任何 HTML 元素都会把 svg 踹开，后面的 path
+  //    变成 xhtml:PATH 不渲染 → 切到比本地仓更宽的窗口（unknown>0 插斜纹）时波形整条消失。
+  //    这三条把「4 条 path 必须在 svg 里」「斜纹是 svg 的兄弟」「单桶/全零也不出空图」钉死。
+  {
+    id: 'F31',
+    name: '波形：仓未覆盖窗口（unknown>0）时曲线仍必须画出来',
+    cfg: (port) => baseCfg(port, { range: '24h' }),
+    // 只种最近 6 小时的行，coverFrom 也停在 6 小时前 → 切 7 天必然 unknown>0（斜纹 96%）
+    seed: `var rows=[]; for (var i=0;i<12;i++) rows.push(__T.row(${NOW - 1800} - i * 1800, 300 + i, 7, 't7', 'gpt-4o', 100 + i, 200, 100)); __T.seedRaw(rows, { newest: ${NOW - 1800}, coverFrom: ${NOW - 6 * 3600} });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.cfg().range = '7d';
+      __app.state.usage = __app.rawAgg('7d');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      var svg = w && w.querySelector('svg');
+      var line = w && w.querySelector('.w-line');
+      var hatch = w && w.querySelector('.w-unk');
+      var d = line ? (line.getAttribute('d') || '') : '';
+      return {
+        hasWave: !!w,
+        paths: svg ? [].map.call(svg.querySelectorAll('path'), function (p) { return p.getAttribute('class'); }) : [],
+        // namespaceURI 不是 SVG 的子元素 = 被 HTML 解析器踹出 svg 的残留
+        foreign: svg ? [].filter.call(svg.children, function (e) { return e.namespaceURI !== 'http://www.w3.org/2000/svg'; }).map(function (e) { return e.tagName; }) : ['NO-SVG'],
+        hatchW: hatch ? parseFloat(hatch.style.width) : 0,
+        hatchInsideSvg: svg && hatch ? svg.contains(hatch) : null,
+        segs: (d.match(/[LC]/g) || []).length,
+        dHasNaN: /NaN|Infinity/.test(d),
+        capL: w ? w.querySelector('.w-l').textContent : '',
+      };
+    })()`,
+    check(out) {
+      return [
+        truthy('波形块必须存在', out.hasWave),
+        eq('波形 4 条 path 必须都在 svg 里（P0 回归点）', out.paths, ['w-base', 'w-area', 'w-glow', 'w-line']),
+        eq('svg 里不许有任何非 SVG 命名空间元素', out.foreign, []),
+        eq('斜纹必须在 svg 外面（否则会踹开 svg）', out.hatchInsideSvg, false),
+        truthy('本用例必须真的命中 unknown>0（斜纹 >90%）', out.hatchW > 90),
+        truthy('曲线必须有 20+ 段（不是空 d / 不是单点）', out.segs > 20),
+        eq('d 里不许出现 NaN/Infinity', out.dHasNaN, false),
+        truthy('未覆盖段必须如实标注「仅覆盖」', /仅覆盖/.test(out.capL)),
+      ];
+    },
+  },
+
+  {
+    id: 'F32',
+    name: '波形：单桶态（今天 00:0x 只有一个点）仍要有描边',
+    cfg: (port) => baseCfg(port, { range: 'today' }),
+    seed: `__T.seedRaw([__T.row(${NOW} - 600, 401, 7, 't7', 'gpt-4o', 10, 10, 100)], { newest: ${NOW} - 600, coverFrom: ${NOW} - 3600 });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      // 把时钟拨到当天 00:20 → today 窗口 cnt = 1（seriesPath 的 n<2 分支）
+      var d0 = new Date(${NOW} * 1000); d0.setHours(0, 20, 0, 0);
+      __app.__setNow(Math.floor(d0.getTime() / 1000));
+      __app.cfg().range = 'today';
+      __app.state.usage = __app.rawAgg('today');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      var line = w && w.querySelector('.w-line');
+      var d = line ? (line.getAttribute('d') || '') : '';
+      return {
+        pts: __app.state.usage ? 1 : 1,
+        paths: w ? [].map.call(w.querySelectorAll('svg path'), function (p) { return p.getAttribute('class'); }) : [],
+        d: d,
+        hasLine: /L/.test(d),
+        dHasNaN: /NaN|Infinity/.test(d),
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('单桶时 4 条 path 仍在', out.paths, ['w-base', 'w-area', 'w-glow', 'w-line']),
+        truthy('单点必须补一条线段（只有 M 的话 SVG 什么都不画）', out.hasLine),
+        eq('d 里不许出现 NaN', out.dHasNaN, false),
+      ];
+    },
+  },
+
+  {
+    id: 'F33',
+    name: '波形：全零态（窗口内没有任何用量）给占位文案，不画空图',
+    cfg: (port) => baseCfg(port, { range: '24h' }),
+    seed: `__T.seedRaw([], { newest: ${NOW} - 600, coverFrom: ${NOW} - 7 * 3600 });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.cfg().range = '24h';
+      __app.state.usage = __app.rawAgg('24h');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      return {
+        hasWave: !!w,
+        capL: w ? w.querySelector('.w-l').textContent : '',
+        capR: w ? w.querySelector('.w-r').textContent : '',
+        dot: w ? !!w.querySelector('.w-dot') : null,
+        paths: w ? [].map.call(w.querySelectorAll('svg path'), function (p) { return p.getAttribute('class'); }) : [],
+      };
+    })()`,
+    check(out) {
+      return [
+        truthy('全零也要有波形块（不能整块消失）', out.hasWave),
+        eq('左侧文案必须是占位', out.capL, '暂无用量数据'),
+        eq('右侧文案必须是占位', out.capR, '暂无用量'),
+        eq('全零不画末端圆点（假的「当前值」）', out.dot, false),
+        eq('4 条 path 仍在（占位不靠删元素实现）', out.paths, ['w-base', 'w-area', 'w-glow', 'w-line']),
+      ];
+    },
+  },
+
+  // ── 1.1.0 优化批（A 批短名单）
+  {
+    id: 'F34',
+    name: 'U4-1 切后台零打点：document.hidden 时不发 /usage/recent',
+    cfg: (port) => baseCfg(port, { range: '24h' }),
+    // 桥只留 secure*（不需要 http）；hubBase 指本机 mock，/usage/recent 会真的打上来
+    preSeed: `window.NativeBridge = { secureAvailable: function () { return false; }, secureGet: function () { return null; }, secureSet: function () { return false; } };`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.cfg().hubBase = 'http://127.0.0.1:' + location.port;
+      __app.state.hubToken = 'tok';
+      __app.state.tab = 'wb';
+      var hide = function (v) { Object.defineProperty(document, 'hidden', { get: function () { return v; }, configurable: true }); };
+      hide(true);
+      // 后台：连打 3 次，一次都不许发出去
+      for (var i = 0; i < 3; i++) { __app.pollLive(); await __T.sleep(40); }
+      // 前台：立刻要发
+      hide(false);
+      __app.pollLive();
+      await __T.sleep(120);
+      return { ok: true };
+    })()`,
+    check() {
+      // ⚠ 时序：前台那次可能还没落盘，所以按「后台期间」的命中数判断而不是总数
+      const usageHits = state.hits.filter((h) => h.p.startsWith('/usage/')).length;
+      return [
+        truthy('前台那次必须真的打出去（否则本用例测的是空气）', usageHits >= 1),
+        eq('后台 3 次 pollLive 必须零请求（前台只有 1 次）', usageHits, 1),
+      ];
+    },
+  },
+
+  {
+    id: 'F35',
+    name: 'U7-3 到期日按本地时区算：UTC 串不许差一天',
+    cfg: (port) => baseCfg(port),
+    run: `(() => {
+      var cases = [
+        // [入参, 期望的本地日]  —— 宿主时区 Asia/Shanghai（UTC+8）
+        ['2026-10-24T23:30:00Z', '2026-10-25'],   // ⭐ 老实现切字符串会给 10-24（差一天）
+        ['2026-10-24T13:00:00Z', '2026-10-24'],   // 不跨日：不许被顺手改坏
+        ['2026-10-25T01:00:00+08:00', '2026-10-25'],  // 带偏移
+        ['2026-10-24 21:00:00', '2026-10-24'],    // 无时区的本地串：按本地解释，原样不动
+        ['2026-10-24', '2026-10-24'],             // 纯日期：就是那一天
+      ];
+      var out = [];
+      for (var i = 0; i < cases.length; i++) {
+        var ts = __app.tsOf(cases[i][0]);
+        out.push({ inp: cases[i][0], ts: ts, day: __app.localDay(ts), want: cases[i][1] });
+      }
+      return { cases: out, bad: __app.tsOf('not-a-time') };
+    })()`,
+    check(out) {
+      const checks = [eq('解析不了的串必须回 null（不许猜今天）', out.bad, null)];
+      for (const c of out.cases) checks.push(eq(c.inp + ' → ' + c.want, c.day, c.want));
+      return checks;
+    },
+  },
+
+  {
+    id: 'F36',
+    name: 'U4-3 凭证不重写：纯 UI 动作不许再调 secureSet',
+    cfg: (port) => baseCfg(port),
+    // 计数桩：secureSet/secureGet 全走内存 Map，能数清调用次数
+    preSeed: `window.__sec = { set: 0, get: 0, store: {} };
+      window.NativeBridge = {
+        secureAvailable: function () { return true; },
+        secureGet: function (k) { window.__sec.get++; return (k in window.__sec.store) ? window.__sec.store[k] : null; },
+        secureSet: function (k, v) { window.__sec.set++; window.__sec.store[k] = v; return true; }
+      };`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var s0 = window.__sec.set;          // boot + migrateCreds 已经把 4 个键写过一遍
+      __app.saveCfg();                    // 纯 UI 动作（切范围 / 点排序都长这样）
+      var s1 = window.__sec.set;
+      __app.cfg().privacy = !__app.cfg().privacy;
+      __app.saveCfg();                    // 改的是普通字段，凭证仍没变
+      var s2 = window.__sec.set;
+      __app.cfg().newapiToken = 'chan' + 'ged-token';
+      __app.saveCfg();                    // 真改了凭证：必须落盘
+      var s3 = window.__sec.set;
+      return { s0: s0, s1: s1, s2: s2, s3: s3, wrote: __app.secureWrote() };
+    })()`,
+    check(out) {
+      return [
+        truthy('开机确实写过凭证（否则桩没生效）', out.s0 >= 1),
+        eq('值没变时 saveCfg 不许调 secureSet', out.s1, out.s0),
+        eq('改普通字段也不许调 secureSet', out.s2, out.s0),
+        eq('真改了令牌必须写一次（配置不许丢）', out.s3, out.s0 + 1),
+        eq('落盘账本记的是新令牌', out.wrote.newapiToken, 'changed-token'),
+      ];
+    },
+  },
+
+  // ── 波形 1.1.1：覆盖标记 + 横轴刻度
+  {
+    id: 'F37',
+    name: '波形：capped 且无重叠时覆盖标记必须跟上（不许满屏假斑马纹）',
+    cfg: (port) => baseCfg(port, { range: '7d' }),
+    // 现场复现：仓里其实有 7 天数据（7×24/6 = 28 桶），但 coverFrom 还停在「只扫过 24 小时」时
+    // 标记的 now-24h，且已 capped（翻到 260 页上限）。UI 会写「仅覆盖 24 小时」+ 86% 斜纹。
+    seed: `var rows=[]; for (var i=0;i<28;i++) rows.push(__T.row(${NOW} - i * 21600 - 60, ${600} + i, 7, 't7', 'gpt-4o', 100, 200, 100)); __T.seedRaw(rows, { newest: ${NOW} - 60, coverFrom: ${NOW} - 86400, capped: true });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(() => {
+      __app.meta();                        // rawMeta() 跑一次：capped + 未脏 → 覆盖标记应推进到最老行
+      __app.cfg().range = '7d';
+      __app.state.usage = __app.rawAgg('7d');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      var hatch = w && w.querySelector('.w-unk');
+      return {
+        coverFrom: __app.raw().coverFrom,
+        oldest: ${NOW} - 27 * 21600 - 60,
+        hatchW: hatch ? parseFloat(hatch.style.width) : 0,
+        capL: w ? w.querySelector('.w-l').textContent : '',
+        serUnknown: (__app.state.usage && __app.state.usage.range) || '',
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('coverFrom 必须推进到最老一行（capped + 无重叠 = 连续翻页）', out.coverFrom, out.oldest),
+        eq('斜纹必须消失（覆盖已达 6.8 天，7 天窗口没有整桶未覆盖）', out.hatchW, 0),
+        truthy('文案不许再写「仅覆盖」', !/仅覆盖/.test(out.capL)),
+      ];
+    },
+  },
+
+  {
+    id: 'F38',
+    name: '波形：24 小时窗口的边界桶不许被当成未覆盖（假斑马纹）',
+    cfg: (port) => baseCfg(port, { range: '24h' }),
+    // ⚠ 时间点必须卡在边界上才复现得出：coverFrom 要落在窗口首桶 (start, start+1h) 之内
+    // （现场就是这德行：窗口按整点对齐，而 coverFrom 取「扫描那一刻 - 24h」= 20:40:35，
+    //  比整点晚 40 分钟 → ceil 就多标一个桶 → 左边挂一条 4% 的斑马纹）
+    seed: `var rows=[]; for (var i=0;i<24;i++) rows.push(__T.row(${NOW} - i * 3600 - 60, ${700} + i, 7, 't7', 'gpt-4o', 100, 200, 100)); __T.seedRaw(rows, { newest: ${NOW} - 60, coverFrom: ${NOW} + 1800 - 86400 });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(() => {
+      __app.cfg().range = '24h';
+      __app.state.usage = __app.rawAgg('24h');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      var hatch = w && w.querySelector('.w-unk');
+      var axis = w ? [].map.call(w.querySelectorAll('.w-axis span'), function (s) { return s.textContent; }) : [];
+      return {
+        hatchW: hatch ? parseFloat(hatch.style.width) : 0,
+        capL: w ? w.querySelector('.w-l').textContent : '',
+        axis: axis,
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('24 小时窗口不该有斜纹（窗口起点只比 coverFrom 早不到一个桶）', out.hatchW, 0),
+        truthy('文案不该说「仅覆盖」', !/仅覆盖/.test(out.capL)),
+        eq('横轴刻度必须有 5 个（24 小时 → HH:00）', out.axis.length, 5),
+        truthy('小时档刻度形如 HH:00', out.axis.every((t) => /^\d{2}:00$/.test(t))),
+      ];
+    },
+  },
+
+  {
+    id: 'F39',
+    name: '波形：7 天横轴刻度按日期（MM-DD），首尾覆盖整个窗口',
+    cfg: (port) => baseCfg(port, { range: '7d' }),
+    seed: `var rows=[]; for (var i=0;i<28;i++) rows.push(__T.row(${NOW} - i * 21600 - 60, ${800} + i, 7, 't7', 'gpt-4o', 100, 200, 100)); __T.seedRaw(rows, { newest: ${NOW} - 60, coverFrom: ${NOW} - 7 * 86400 - 60 });`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(() => {
+      __app.cfg().range = '7d';
+      __app.state.usage = __app.rawAgg('7d');
+      __app.state.usageLive = null;
+      __app.state.busy.usage = false;
+      __app.showTab('overview');
+      var w = document.getElementById('ov-wave');
+      var axis = w ? [].map.call(w.querySelectorAll('.w-axis span'), function (s) { return s.textContent; }) : [];
+      var hatch = w && w.querySelector('.w-unk');
+      var d = w ? (w.querySelector('.w-line').getAttribute('d') || '') : '';
+      return { axis: axis, hatchW: hatch ? parseFloat(hatch.style.width) : 0, segs: (d.match(/[LC]/g) || []).length };
+    })()`,
+    check(out) {
+      const pad = (n) => String(n).padStart(2, '0');
+      const day = (sec) => { const d = new Date(sec * 1000); return pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+      return [
+        // 4 个而不是 5 个：28 桶 ÷ 3 = 9 桶 = 2.25 天，日期不会挤成相邻两天
+        eq('7 天刻度 4 个', out.axis.length, 4),
+        truthy('日期档刻度形如 MM-DD', out.axis.every((t) => /^\d{2}-\d{2}$/.test(t))),
+        eq('末位刻度 = 当前桶（右端对齐）', out.axis[3], day(NOW)),
+        truthy('相邻刻度不得同一天', out.axis.every((t, i) => i === 0 || t !== out.axis[i - 1])),
+        eq('首尾不重复', out.axis[0] !== out.axis[3], true),
+        eq('本用例不该有斜纹', out.hatchW, 0),
+        truthy('曲线仍在（刻度不许影响画线）', out.segs > 20),
       ];
     },
   },

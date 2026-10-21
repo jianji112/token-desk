@@ -89,10 +89,17 @@ public final class SecureStore {
         }
     }
 
-    /** 加密写入单个 key。成功返回 true；任何异常返回 false（不抛出、不带内容）。 */
+    /** 加密写入单个 key。成功返回 true；任何异常返回 false（不抛出、不带内容）。
+     *
+     *  ⭐ 写放大收口（1.1.0）：排序、切范围、翻隐私开关这类纯 UI 动作也会调 saveCfg()，
+     *  而 4 个敏感键绝大多数时候一字未改。老实现每次都重新加密 + commit（fsync）→ 主线程可感。
+     *  1. **值没变直接返回 true**：连加密都不做（一次解密 vs 一次加密+落盘，差一个量级）。
+     *  2. `commit()` → `apply()`：apply 同步更新内存映射、异步落盘，后续 getString 立刻可见。 */
     public boolean secureSet(String key, String value) {
         if (!allowedKey(key) || value == null) return false;
         try {
+            String prev = secureGet(key);
+            if (prev != null && prev.equals(value)) return true;   // 值未变：不加密、不落盘
             byte[] iv;
             byte[] cipherText;
             synchronized (SecureStore.class) {
@@ -107,7 +114,8 @@ public final class SecureStore {
             System.arraycopy(iv, 0, packed, 0, iv.length);
             System.arraycopy(cipherText, 0, packed, iv.length, cipherText.length);
             String encoded = Base64.encodeToString(packed, Base64.NO_WRAP);
-            return prefs().edit().putString(key, encoded).commit();
+            prefs().edit().putString(key, encoded).apply();   // apply() 无返回值，异步落盘
+            return true;
         } catch (Throwable t) {
             return false;
         }

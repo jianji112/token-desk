@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -20,8 +21,8 @@ FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 FONT_B = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 TMP_HTML = os.path.join(ROOT, "tools", ".preview-tmp.html")
 PORT = 9333
-SHOT_W, SHOT_H = 434, 964
-SCALE = 2.8125
+SHOT_W, SHOT_H = 407, 837
+SCALE = 3.0
 
 CHROME = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
 
@@ -115,30 +116,48 @@ def build_wb():
         {"uid": "a1b2c3d4e5f60001", "nickname": "主力账号", "realm": "cn", "enabled": True,
          "credits": {"remain": 128400000, "used": 86400000, "size": 214800000,
                      "earliest_expiring": {"cycle_end_time": "2026-11-08 00:00:00"},
-                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 12}},
+                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 12},
+                     "packages": [
+                         {"remain": 3200.0, "expire_time": "2026-11-08 09:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 1800.0, "expire_time": "2026-11-08 15:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 2400.0, "expire_time": "2026-11-15 09:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 1100.0, "expire_time": "2026-11-22 09:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 950.0, "expire_time": "2026-11-29 09:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 600.0, "expire_time": "2026-12-06 09:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 500.0, "expire_time": None, "is_expired": False, "no_expiry": True}]},
          "modelCooldowns": [], "disabledModels": []},
         {"uid": "a1b2c3d4e5f60002", "nickname": "备用账号", "realm": "intl", "enabled": True,
          "credits": {"remain": 74100000, "used": 41200000, "size": 115300000,
                      "earliest_expiring": {"cycle_end_time": "2026-11-15 00:00:00"},
-                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 5}},
+                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 5},
+                     "packages": [
+                         {"remain": 2100.0, "expire_time": "2026-11-15 10:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 1500.0, "expire_time": "2026-11-22 10:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 800.0, "expire_time": "2026-11-29 10:00:00", "is_expired": False, "no_expiry": False}]},
          "modelCooldowns": [], "disabledModels": []},
         {"uid": "a1b2c3d4e5f60003", "nickname": "测试账号", "realm": "cn", "enabled": True,
          "credits": {"remain": 52300000, "used": 31800000, "size": 84100000,
                      "earliest_expiring": {"cycle_end_time": "2026-11-02 00:00:00"},
-                     "checkin": {"active": True, "today_checked_in": False, "streak_days": 2}},
+                     "checkin": {"active": True, "today_checked_in": False, "streak_days": 2},
+                     "packages": [
+                         {"remain": 450.0, "expire_time": "2026-11-02 12:00:00", "is_expired": False, "no_expiry": False},
+                         {"remain": 320.0, "expire_time": "2026-11-09 12:00:00", "is_expired": False, "no_expiry": False}]},
          "modelCooldowns": [{"model": "gpt-4o-mini", "expiresAt": now() + 3600 * 6,
                              "startedAt": now() - 3600 * 2}],
          "disabledModels": []},
         {"uid": "a1b2c3d4e5f60004", "nickname": "备用二", "realm": "intl", "enabled": True,
          "credits": {"remain": 31700000, "used": 18600000, "size": 50300000,
                      "earliest_expiring": {"cycle_end_time": "2026-11-20 00:00:00"},
-                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 3}},
+                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 3},
+                     "packages": [
+                         {"remain": 1200.0, "expire_time": "2026-11-20 14:00:00", "is_expired": False, "no_expiry": False}]},
          "modelCooldowns": [], "disabledModels": []},
         {"uid": "a1b2c3d4e5f60005", "nickname": "归档账号", "realm": "cn", "enabled": False,
          "inCooldown": True,
          "credits": {"remain": 0, "used": 84200000, "size": 84200000,
                      "earliest_expiring": None,
-                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 0}},
+                     "checkin": {"active": True, "today_checked_in": True, "streak_days": 0},
+                     "packages": []},
          "modelCooldowns": [], "disabledModels": ["deepseek-chat"]},
     ]
     creds = {"a1b2c3d4e5f60001": 6.20, "a1b2c3d4e5f60002": 2.80, "a1b2c3d4e5f60003": 1.15,
@@ -190,6 +209,23 @@ def build_wb():
     }
 
 
+def build_cred():
+    acct = {"研发主力": "a1b2c3d4e5f60001", "内容生产": "a1b2c3d4e5f60002",
+            "离线批处理": "a1b2c3d4e5f60003", "测试临时": "a1b2c3d4e5f60004",
+            "备用二": "a1b2c3d4e5f60005"}
+    idx = {}
+    for r in build_usage()["recent"]:
+        model = r["model_name"]
+        realm = "intl" if model.startswith("global:") else "cn"
+        model = re.sub(r"^(cn|global):", "", model)
+        key = "%s|%s|%d|%d" % (realm, model, r["prompt_tokens"], r["completion_tokens"])
+        idx[key] = {
+            "cr": round(0.02 + (r["prompt_tokens"] + r["completion_tokens"]) / 90000.0, 2),
+            "uid": acct.get(r["token_name"], "a1b2c3d4e5f60001"),
+        }
+    return idx
+
+
 INJECT = """
 (function(){
   var A = window.__app;
@@ -204,7 +240,9 @@ INJECT = """
   S.rate = {unit: 500000, cny: 7.3, sym: '\\u00a5', kind: 'CNY'};
   S.usage = __USAGE__;
   S.wb = __WB__;
-  S.modelsExpanded = false; S.accOpen = {}; S.lastErr = null;
+  S.credIdx = __CRED__;
+  S.modelsExpanded = false; S.accOpen = {"a1b2c3d4e5f60001": true}; S.lastErr = null;
+  A.live({"a1b2c3d4e5f60001": {age: 6, run: false}, "a1b2c3d4e5f60003": {age: 14, run: false}});
   return 'ok';
 })()
 """
@@ -298,7 +336,8 @@ def render_shots(workdir):
                    .replace("__RAW__", json.dumps(build_rawlog(), separators=(",", ":")))
                    .replace("__TOKENS__", json.dumps(build_tokens(), ensure_ascii=False))
                    .replace("__USAGE__", json.dumps(build_usage(), ensure_ascii=False))
-                   .replace("__WB__", json.dumps(build_wb(), ensure_ascii=False)))
+                   .replace("__WB__", json.dumps(build_wb(), ensure_ascii=False))
+                   .replace("__CRED__", json.dumps(build_cred(), ensure_ascii=False, separators=(",", ":"))))
         if got != "ok":
             raise RuntimeError(f"注入失败: {got}")
         shots = {}
