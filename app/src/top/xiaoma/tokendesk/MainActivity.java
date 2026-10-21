@@ -7,7 +7,6 @@ import android.content.Context;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Looper;
 import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
@@ -25,10 +24,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class MainActivity extends Activity {
@@ -47,12 +44,6 @@ public class MainActivity extends Activity {
     // ⚠️ 不能在字段初始化期构造：字段初始化跑在 Activity 构造里，早于 attachBaseContext，
     // this.getApplicationContext() 必抛 NPE → 启动即崩（真机实测）。改为 onCreate 里赋值。
     SecureStore secure;
-    // Wave B ③「按需开闸」：浏览器内核直连用的临时跨源闸门。
-    // 同 SecureStore：字段初始化期不构造，统一在 onCreate 里赋值，避免再踩构造期崩溃。
-    // 不持久化——进程重启必然回到「关」，磁盘上不留「后门已开」的状态。
-    BrowserGate browserGate;
-    // 闸门落到 WebSettings 时等 UI 线程的最长时间：只是改两个内存标志，1s 足够兜底
-    static final int BROWSER_MODE_WAIT_MS = 1000;
 
     // ---- 凭证安全存储对外接口（Bridge 只做转发，逻辑全在 SecureStore） ----
     /** Keystore 是否可用；返回 false 时 JS 必须回退 localStorage 并在设置页标红。 */
@@ -75,49 +66,6 @@ public class MainActivity extends Activity {
         secure.secureClear();
     }
 
-    /**
-     * Wave B ③：按需开闸（浏览器内核直连）。四条约束见 BrowserGate 类注释。
-     * 返回值直接透传给 JS：true 才让它重载页面一次，false 一律不动（被拒 / 幂等 / 无变化）。
-     */
-    boolean setBrowserMode(boolean on, boolean trusted) {
-        BrowserGate g = browserGate;
-        return g != null && g.set(on, trusted);
-    }
-
-    /**
-     * 闸门落到真实 WebSettings。只动 universal-access 这一个开关：
-     * {@code setAllowFileAccessFromFileURLs} 恒为 false —— 它对 CORS 没用，
-     * 放开只会让 file:// 页能 XHR 同目录任意文件，白白扩大本地文件可读面。
-     * 关闸后两个开关都读回 false。
-     */
-    private void applyBrowserMode(boolean universalAccess) {
-        final Runnable r = () -> {
-            if (webView == null) return;
-            WebSettings s = webView.getSettings();
-            s.setAllowUniversalAccessFromFileURLs(universalAccess);
-            s.setAllowFileAccessFromFileURLs(false);
-        };
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            r.run();
-            return;
-        }
-        // JavaBridge 线程进来：等设置真的落到 WebSettings 之后再返回。
-        // 否则 JS 紧接着 location.reload() 会拿旧设置重新加载 —— 又一次 CORS 失败 / 白页。
-        final CountDownLatch done = new CountDownLatch(1);
-        runOnUiThread(() -> {
-            try {
-                r.run();
-            } finally {
-                done.countDown();
-            }
-        });
-        try {
-            done.await(BROWSER_MODE_WAIT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     /** 原生请求完成回调（pool 线程）→ 回 UI 线程喂给 window.__nativeHttp。 */
     private void onHttpResult(String id, String payload) {
         final String js = "window.__nativeHttp && window.__nativeHttp("
@@ -134,8 +82,6 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         // SecureStore 只能在这里（attachBaseContext 之后）构造，见字段声明处注释
         secure = new SecureStore(this);
-        // 闸门同理（不碰 context，但保持同一约定：一律在 onCreate 里构造）
-        browserGate = new BrowserGate(this::applyBrowserMode);
         getWindow().setStatusBarColor(Color.parseColor("#0b0f14"));
         getWindow().setNavigationBarColor(Color.parseColor("#0b0f14"));
 
@@ -301,16 +247,6 @@ public class MainActivity extends Activity {
         public boolean cancel(String id) {
             if (!allowed()) return false;
             return host.jobs.cancel(id);
-        }
-
-        /**
-         * Wave B ③：浏览器内核直连「按需开闸」。
-         * true=状态真的变了，调用方应重载页面一次；false=被拒 / 幂等 / 无变化。
-         * 走与另外 12 个方法同一套来源白名单；不持久化，进程重启回 false。
-         */
-        @JavascriptInterface
-        public boolean setBrowserMode(boolean on) {
-            return host.setBrowserMode(on, allowed());
         }
 
         // ---- 凭证安全存储（P0-3 Wave A）：JS 侧只认这四个方法 ----
