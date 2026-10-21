@@ -692,7 +692,7 @@
       clearTimeout(timer);
       var msg = String((e && e.message) || e);
       if (/abort/i.test(msg)) throw new Error('请求超时（' + Math.round(timeout / 1000) + 's）：' + url);
-      throw new Error('浏览器内核请求失败：' + msg + '（域名需走浏览器通道；若刚切到内网 IP 可试试改成 http）');
+      throw new Error('浏览器内核直连失败：' + msg + '（该通道要求服务端返回 CORS 头；内网网关请到设置里切回「原生请求」）');
     });
   }
 
@@ -2010,7 +2010,8 @@
       '<div class="note">默认「原生请求」走 App 内置 HTTP 客户端，不经过页面同源限制。' +
       '地址是公网 https 域名、原生被网关断连时，才切「自动」或「浏览器内核直连」。</div>' +
       '<div class="note" style="color:#fcd34d">「浏览器内核直连」由页面自己发请求，不经过原生 HTTP 层，' +
-      '会绕过部分防护（原生侧地址/来源校验），仅在内网可信环境使用。</div></div>' +
+      '会绕过部分防护（原生侧地址/来源校验）。自本版本起页面已禁止跨源访问（file:// 万能跨源已关闭），' +
+      '该通道只对显式返回 Access-Control-Allow-Origin 的服务端有效——内网网关请用「原生请求」。</div></div>' +
       '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">NewAPI 网关</div></div>' +
