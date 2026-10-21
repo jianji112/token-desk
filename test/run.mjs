@@ -1151,6 +1151,66 @@ const fixtures = [
   },
 
   {
+    id: 'F22',
+    name: '账号签到状态：以 hub 的 lastCheckin 真实记录为准（快照漂移不得误报未签到）',
+    // 事故现场：hub 在 08:36:48 统一签到，但 credits.checkin.today_checked_in 只是各账号
+    // 「拉积分那一刻」的快照（昨天 20:46 / 今天 05:10 / 06:40 …）。快照早于签到的账号一律
+    // 显示「未签到」，面板（读 lastCheckin）却是全绿 —— 用户看到的就是「只有一个号签到了」。
+    // 判定必须回到 lastCheckin：今天 → 已签到；不是今天 → 未签到；缺失才回落到快照逻辑。
+    cfg: (port) => baseCfg(port),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      function p2(n) { return n < 10 ? '0' + n : '' + n; }
+      function dayOf(ts) { var d = new Date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); }
+      var TODAY = dayOf(Date.now());                 // 由冻结时钟推出，不写死日期
+      var YEST = dayOf(Date.now() - 86400000);
+      function acc(uid, lastCheckin, ck) {
+        return { uid: uid, realm: 'cn', enabled: true, nickname: uid,
+                 lastCheckin: lastCheckin, credits: ck === null ? null : { checkin: ck } };
+      }
+      // A: 真实记录是今天，快照（旧）说未签到 → 必须「已签到」（事故原形）
+      // B: 快照说已签到，真实记录是昨天 → 必须「未签到」（不许把旧快照当真）
+      // C: 没有 lastCheckin（intl 号无签到功能）→ 回落快照逻辑，必须「无签到」
+      __app.state.wb = {
+        accounts: { accounts: [
+          acc('u-today', TODAY + ' 08:36:48', { active: true, today_checked_in: false }),
+          acc('u-yest', YEST + ' 08:36:48', { active: true, today_checked_in: true }),
+          acc('u-none', null, null),
+        ] },
+        health: { ok: true, accounts: 3, accounts_ready: 3 },
+      };
+      __app.showTab('wb');
+      var el = document.querySelector('[data-view="wb"]');
+      var rows = [].slice.call(el ? el.querySelectorAll('.acc') : []).map(function (r) {
+        var n = r.querySelector('.name'), m = r.querySelector('.meta');
+        var sp = m ? m.querySelector('span[title]') : null;
+        return { name: n ? n.textContent : '', meta: m ? m.textContent : '',
+                 title: sp ? sp.getAttribute('title') : null };
+      });
+      function pick(uid) {
+        for (var i = 0; i < rows.length; i++) if (rows[i].name.indexOf(uid) >= 0) return rows[i];
+        return { name: '(missing)', meta: '', title: null };
+      }
+      return { n: rows.length, today: TODAY, yest: YEST,
+               a: pick('u-today'), b: pick('u-yest'), c: pick('u-none') };
+    })()`,
+    check(out) {
+      const tail = (s) => String(s || '').trim().slice(-3);
+      return [
+        eq('测试前提：三个账号各渲染一行', out.n, 3),
+        eq('测试前提：昨天串与今天串不同（冻结时钟推算成功）', out.yest !== out.today, true),
+        eq('今天有签到记录 → 已签到（快照说未签到也不算数）', tail(out.a.meta), '已签到'),
+        eq('昨天有签到记录 → 未签到（不许被旧快照的 true 顶掉）', tail(out.b.meta), '未签到'),
+        eq('没有 lastCheckin → 回落快照逻辑：无签到', tail(out.c.meta), '无签到'),
+        eq('已签到那行的 title 必须挂上 lastCheckin 原文', (out.a.title || '').indexOf(out.today + ' 08:36:48') >= 0, true),
+        eq('昨天那行的 title 也必须挂原文（方便肉眼核对）', (out.b.title || '').indexOf(out.yest + ' 08:36:48') >= 0, true),
+        eq('回落分支也要有 title 说明依据', (out.c.title || '').indexOf('该账号无需签到') >= 0, true),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),

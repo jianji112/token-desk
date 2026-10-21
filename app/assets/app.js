@@ -1812,6 +1812,28 @@
         '</b> · ' + accs.length + ' 个账号' + (cm.ok ? '' : '（面板没返回按账号积分，数值可能为 —）') + '</div>';
     }
     var maxToday = (accs.length ? num(credOf(accs[0])) : 0) || 1;
+    // 签到状态：hub 的 lastCheckin 是「真实签到动作」记录，而 credits.checkin.today_checked_in
+    // 只是「拉积分那一刻」的快照——各账号快照时间不同（昨天 20:46 / 今天 05:10 / 08:10 …），
+    // hub 统一签到后快照没跟上的账号一律显示未签到，而面板读 lastCheckin 是全绿的。
+    // 所以以 lastCheckin 为准，缺失时（如 intl 号没有签到功能）才回落到快照逻辑。
+    // 今天串由 Date.now() 推出（与 harness 的冻结时钟一致，禁止依赖 new Date() 的实时值）。
+    var TODAY10 = (function () {
+      var d = new Date(Date.now());
+      return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    })();
+    function ckText(a, ck) {
+      var lc = a && a.lastCheckin;
+      if (typeof lc === 'string' && lc) {
+        return {
+          text: lc.slice(0, 10) === TODAY10 ? '已签到' : '未签到',
+          title: '面板签到记录 ' + lc + '（今天 ' + TODAY10 + '，以真实记录为准）'
+        };
+      }
+      return {
+        text: ck.active ? (ck.today_checked_in ? '已签到' : '未签到') : '无签到',
+        title: ck.active ? '面板没返回签到记录，按积分快照判定' : '该账号无需签到'
+      };
+    }
     accs.forEach(function (a) {
       var c = a.credits || {};
       var dm = accIssues(a);
@@ -1821,6 +1843,7 @@
       if (a.tokenExpired || a.needRelogin) badges += '<span class="pill off">需重登</span>';
       if (a.dailyLimitBlocked || a.creditLimitReached) badges += '<span class="pill warn">限流</span>';
       var ck = c.checkin || {};
+      var ckt = ckText(a, ck);
       var today = num(credOf(a));
       var w = Math.max(2, Math.round(today / maxToday * 100));
       html += '<div class="acc' + (a.enabled ? '' : ' off') + '">' +
@@ -1833,7 +1856,7 @@
         '<div class="bar"><i style="width:' + w + '%"></i></div>' +
         '<div class="meta">剩余 ' + fmtQty(c.remain) + ' · 到期 ' +
         (c.earliest_expiring && c.earliest_expiring.cycle_end_time ? esc(String(c.earliest_expiring.cycle_end_time).slice(5, 10)) : '—') +
-        ' · ' + (ck.active ? (ck.today_checked_in ? '已签到' : '未签到') : '无签到') +
+        ' · <span title="' + esc(ckt.title) + '">' + ckt.text + '</span>' +
         '</div>' +
         (dm.length && open ? '<div class="acc-more"><div class="acc-more-h">' +
           (dm.filter(function (x) { return x.kind === 'cool'; }).length
