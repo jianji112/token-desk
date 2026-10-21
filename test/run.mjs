@@ -1117,6 +1117,40 @@ const fixtures = [
   },
 
   {
+    id: 'F21',
+    name: '启动清老日志仓 tokendesk.rawlog.v1（v3 不许被牵连）',
+    // v1 是升级前遗留在 localStorage 里的裸行数组（真机上 653KB），v3 起已无任何代码读它，
+    // 但验收项「旧 localStorage 键必须已清空」正是这一条：不清就永远是红的。
+    // seed 必须在 app.js 之前写入（preSeed），才能测到「启动时」这一步。
+    cfg: (port) => baseCfg(port),
+    preSeed: `window.NativeBridge = {};
+      try {
+        localStorage.setItem('tokendesk.rawlog.v1', JSON.stringify({ rows: new Array(500).join('x') }));
+        localStorage.setItem('tokendesk.rawlog.v2', '{"rows":[]}');
+      } catch (e) {}`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var keys = [];
+      try { for (var i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (e) {}
+      var r = __app.raw();
+      return { v1: localStorage.getItem('tokendesk.rawlog.v1'),
+               v2: localStorage.getItem('tokendesk.rawlog.v2'),
+               rawKey: __app.rawKey(), cfgAlive: !!localStorage.getItem('tokendesk.cfg.v1'),
+               rows: r.rows, keys: keys.sort() };
+    })()`,
+    check(out) {
+      return [
+        eq('启动后 tokendesk.rawlog.v1 必须不存在', out.v1, null),
+        eq('v1 清理不得把 v3 的键改掉（RAW_KEY 仍是 v3）', out.rawKey, 'tokendesk.rawlog.v3'),
+        eq('v2 老键也仍然照旧被清（原有行为不许回退）', out.v2, null),
+        eq('清理不得波及配置键', out.cfgAlive, true),
+        eq('清理之后日志仓仍然可读（rows 数值正常）', typeof out.rows, 'number'),
+        eq('localStorage 里不得再出现 v1 键名', out.keys.filter(function (k) { return k === 'tokendesk.rawlog.v1'; }).length, 0),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),

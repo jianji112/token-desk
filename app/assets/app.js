@@ -445,6 +445,11 @@
     } catch (e) { }
   }
 
+  // 老版本（v1）的日志仓：一个 650KB 级的裸行数组，v3 起已由 RAW_KEY / RAW_KEY_LEGACY 接管。
+  // 它不参与任何业务逻辑，却会一直躺在 localStorage 里（旧验收项「旧键必须已清空」就是它）。
+  // 启动时无条件清掉：幂等、不碰桥、绝不碰 v3 的 RAW_KEY。
+  try { localStorage.removeItem('tokendesk.rawlog.v1'); } catch (e) { }
+
   var CFG = loadCfg();
   migrateChannel();  // 必须在 boot() 之前：boot 的 saveCfg() 会把 CFG.channel 写回 LS
   migrateCreds();   // 必须留在 boot() 之前：迁移只搬凭证，不碰日志仓
