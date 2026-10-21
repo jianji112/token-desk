@@ -1428,7 +1428,7 @@
     }
 
     html += '<div class="card"><div class="card-h"><div class="card-t">令牌列表</div>' +
-      '<span class="pill info tok-sortpill" data-act="tok-sort" title="点一下换排序">' +
+      '<span class="pill info tok-sortpill" data-act="tok-sort">' +
       TOK_SORTS.map(function (o) { return o[0] === tokSortKey() ? o[1] : ''; }).join('') + '</span>' +
       '<button class="tok-b ok" data-act="tok-new">＋ 新建</button></div>' +
       '<div id="tok-list"></div></div>';
