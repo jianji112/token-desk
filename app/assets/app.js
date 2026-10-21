@@ -17,10 +17,17 @@
   // 结果就是每次冷启都往 GitHub 打一次（未认证 60 次/小时/IP，弱网用户会被打穿）。
   var UPD_AT = 'tokendesk.updat.v1';
   var UPD_MAXAGE = 6 * 3600 * 1000;   // 启动/定时检查的最小间隔：6 小时
+  // 更新源按顺序试：直连最准，镜像是弱网/被墙时的兜底（只读公开 Release 信息，
+  // 不带任何私有数据，所以走第三方加速器没有信息泄露面）。
+  var UPD_REPO = 'jianji112/token-desk';
   var UPD_URLS = [
-    'https://api.github.com/repos/jianji112/token-desk/releases/latest'
+    'https://api.github.com/repos/' + UPD_REPO + '/releases/latest',
+    'https://gh-proxy.com/https://api.github.com/repos/' + UPD_REPO + '/releases/latest',
+    'https://ghfast.top/https://api.github.com/repos/' + UPD_REPO + '/releases/latest'
   ];
-  var UPD_TIMEOUT_MS = 4000;
+  // 4s 太短：国内直连 api.github.com 常常要 5~15s（DNS + TLS + 跨境链路），
+  // 超时先于响应到达就会误报「检查失败」。15s 覆盖绝大多数慢链路。
+  var UPD_TIMEOUT_MS = 15000;
   var PRESETS = {
     public: { newapiBase: '__PRESET_PUBLIC_NEWAPI__', hubBase: '__PRESET_PUBLIC_HUB__' },
     lan:    { newapiBase: '__PRESET_LAN_NEWAPI__',    hubBase: '__PRESET_LAN_HUB__' }
@@ -3035,6 +3042,18 @@
       var timer = setTimeout(function () { done = true; reject(new Error('timeout')); }, UPD_TIMEOUT_MS);
       function fail(e) { if (done) return; done = true; clearTimeout(timer); reject(e || new Error('fail')); }
       function ok(j) { if (done) return; done = true; clearTimeout(timer); resolve(j); }
+      // 双通道：先浏览器内核 fetch，失败再走原生桥（Java HttpURLConnection）。
+      // 两条网络栈的可达性不一定一致：WebView 的 fetch 被墙/超时，原生桥往往还能通。
+      function viaNative() {
+        if (!window.NativeBridge || typeof window.NativeBridge.http !== 'function') {
+          return fail(new Error('浏览器内核与原生桥均不可用'));
+        }
+        nativeHttp('GET', url, { Accept: 'application/vnd.github+json' }, undefined, UPD_TIMEOUT_MS, true)
+          .then(function (r) {
+            if (!r || r.status < 200 || r.status >= 300) return fail(new Error('HTTP ' + (r && r.status)));
+            try { ok(JSON.parse(r.body)); } catch (e) { fail(e); }
+          }, function () { fail(new Error('浏览器内核与原生桥均失败')); });
+      }
       try {
         // 必须就地写 window.fetch(...)：裸 fetch 变量在浏览器里 this 不对会 Illegal invocation，
         // 就近取也让 preSeed 里的 fetch 桩拦得住（不被闭包提前固定成真 fetch）
@@ -3043,8 +3062,8 @@
             if (!r || !r.ok) return fail(new Error('HTTP ' + (r && r.status)));
             return r.json();
           })
-          .then(ok, fail);
-      } catch (e) { fail(e); }
+          .then(ok, function () { viaNative(); });
+      } catch (e) { viaNative(); }
     });
   }
 

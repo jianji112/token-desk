@@ -1457,6 +1457,60 @@ const fixtures = [
   },
 
   {
+    id: 'F23e',
+    name: '更新通道 fallback：fetch 失败时原生桥接管（双通道 + 多源兜底）',
+    // 现场复现：主人手机网络下浏览器内核 fetch 访问 api.github.com 失败（跨境链路 4s 超时太短），
+    // 只有浏览器通道时直接报「检查失败」。修法：超时 4s→15s + fetch 失败后 fallback 原生桥 + 多镜像源。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = {
+        appInfo: function () { return JSON.stringify({ version: '1.1.4', sdk: 34, model: 'test' }); },
+        http: function (id, method, url) {
+          var u = String(url);
+          if (u.indexOf('api.github.com') < 0) {            // 其它请求（日志扫描等）回空页，不计数
+            setTimeout(function () {
+              window.__nativeHttp(id, JSON.stringify({ status: 200, ms: 1, via: 'native', body: JSON.stringify({ items: [], total: 0 }) }));
+            }, 2);
+            return;
+          }
+          window.__NATIVE_CALLS = (window.__NATIVE_CALLS || 0) + 1;   // 只数更新检查这一条
+          setTimeout(function () {
+            window.__nativeHttp(id, JSON.stringify({
+              status: 200, ms: 12, via: 'native',
+              body: JSON.stringify({ tag_name: 'v1.1.9', html_url: 'https://example.invalid/r', body: 'x',
+                                     assets: [{ name: 'TokenDesk-1.1.9.apk', browser_download_url: 'https://example.invalid/a.apk' }] })
+            }));
+          }, 5);
+        }
+      };
+      (function () {
+        var real = window.fetch;
+        window.__FETCH_TRIED = 0;
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__FETCH_TRIED++;                       // 浏览器内核通道：一律失败（模拟被墙/超时）
+          return Promise.reject(new Error('net::ERR_CONNECTION_TIMED_OUT'));
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var URLS = ['https://api.github.com/repos/x/y/releases/latest'];
+      var r = await __app.checkUpdate({ force: true, cur: '1.1.4', urls: URLS });
+      return { state: r.state, tag: r.tag, apkUrl: r.apkUrl,
+               fetchTried: window.__FETCH_TRIED, nativeCalls: window.__NATIVE_CALLS || 0 };
+    })()`,
+    check(out) {
+      return [
+        eq('fetch 通道必须先试（不能直接跳过浏览器通道）', out.fetchTried, 1),
+        eq('fetch 失败后原生桥必须接管', out.nativeCalls, 1),
+        eq('双通道兜底后必须拿到结论（不许报检查失败）', out.state, 'new'),
+        eq('版本号从原生桥返回体解析出来', out.tag, '1.1.9'),
+        eq('APK 附件直链必须解析出来（供下载并安装）', out.apkUrl, 'https://example.invalid/a.apk'),
+      ];
+    },
+  },
+
+  {
     id: 'F24',
     name: '更新结论落盘：同日重开仍显示上次结论 + 「今天 HH:MM 查过」；跨天/换版本/失败一律作废',
     // 「只查一次」+「结论只在内存」= 用户刚查完、关掉再开就看到「未检查」，像坏了。
