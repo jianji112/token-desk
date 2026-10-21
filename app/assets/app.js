@@ -2,6 +2,7 @@
   'use strict';
 
   var LS_KEY = 'tokendesk.cfg.v1';
+  var CHAN_MIG = 'tokendesk.chanmig.v1';   // 一次性通道迁移标记：置 '1' 后永不重复迁移
   var PRESETS = {
     public: { newapiBase: '__PRESET_PUBLIC_NEWAPI__', hubBase: '__PRESET_PUBLIC_HUB__' },
     lan:    { newapiBase: '__PRESET_LAN_NEWAPI__',    hubBase: '__PRESET_LAN_HUB__' }
@@ -423,7 +424,29 @@
     if (leak) saveCfg();
   }
 
+  // Wave B 关掉 file:// 万能跨源后，壳内「浏览器内核直连」对内网网关必然 CORS 失败；
+  // 老版本默认 channel='browser'，这些用户升级后一开机全红。一次性迁移成 native。
+  // 只在壳内做（无 NativeBridge 的网页版和测试环境保持原值），迁移后用户可自由改回。
+  // 硬约束：不许调 saveCfg() —— 它会对 4 个敏感键各调一次 secureSet，直接撞 F16 的
+  // 「开机过程 bridge 最多试一次」。所以这里只直接改 LS_KEY 里的 channel 字段。
+  function migrateChannel() {
+    try {
+      if (!window.NativeBridge) return;
+      if (localStorage.getItem(CHAN_MIG) === '1') return;
+      if (CFG.channel === 'browser') {
+        var raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          var o = JSON.parse(raw);
+          if (o && typeof o === 'object') { o.channel = 'native'; localStorage.setItem(LS_KEY, JSON.stringify(o)); }
+        }
+        CFG.channel = 'native';
+      }
+      localStorage.setItem(CHAN_MIG, '1');
+    } catch (e) { }
+  }
+
   var CFG = loadCfg();
+  migrateChannel();  // 必须在 boot() 之前：boot 的 saveCfg() 会把 CFG.channel 写回 LS
   migrateCreds();   // 必须留在 boot() 之前：迁移只搬凭证，不碰日志仓
   var S = {
     tab: 'overview',

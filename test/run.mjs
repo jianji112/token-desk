@@ -934,6 +934,51 @@ const fixtures = [
   },
 
   {
+    id: 'F17a',
+    name: '壳内老配置一次性迁移：browser → native',
+    cfg: (port) => baseCfg(port),   // baseCfg 默认 channel:'browser'，正好是老版本默认值
+    // Wave B 关掉 file:// 万能跨源后，壳内「浏览器内核直连」对内网网关必然 CORS 失败；
+    // 老版本默认 channel='browser'，这些用户升级后一开机全红，须一次性迁移。
+    // 桩只有 bridge 对象、没有 secure API → secureAvailable()=false，走明文回退，与本例无关。
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var ls = {};
+      try { ls = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      return { ch: __app.cfg().channel, lsCh: ls.channel || null, mig: localStorage.getItem('tokendesk.chanmig.v1') };
+    })()`,
+    check(out) {
+      return [
+        eq('壳内老配置 browser 必须迁成 native', out.ch, 'native'),
+        eq('localStorage 里的 channel 也必须已翻成 native（不只是内存值）', out.lsCh, 'native'),
+        eq('迁移 marker 必须落位（保证只迁一次）', out.mig, '1'),
+      ];
+    },
+  },
+
+  {
+    id: 'F17b',
+    name: '迁移只做一次：marker 已在 → 用户手动改回的 browser 必须保留',
+    cfg: (port) => baseCfg(port),
+    // 反方向保护：迁移若每次启动都跑，用户明确切回「浏览器内核直连」会被静默改掉，
+    // 等于永远无法使用该通道（即使服务端返回了 CORS 头）。
+    preSeed: `window.NativeBridge = {}; try { localStorage.setItem('tokendesk.chanmig.v1', '1'); } catch (e) {}`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var ls = {};
+      try { ls = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      return { ch: __app.cfg().channel, lsCh: ls.channel || null, mig: localStorage.getItem('tokendesk.chanmig.v1') };
+    })()`,
+    check(out) {
+      return [
+        eq('已迁移过就不再动 browser（用户显式选择必须保留）', out.ch, 'browser'),
+        eq('localStorage 里的 channel 也保持 browser', out.lsCh, 'browser'),
+        eq('marker 保持为 1', out.mig, '1'),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
