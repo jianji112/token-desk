@@ -1556,7 +1556,7 @@
     if (S.errors.usage) html += errBox(S.errors.usage);
 
     if (!agg) {
-      html += '<div class="card"><div class="empty">还没有用量数据<br>选一个时间范围开始统计</div></div>';
+      html += '<div class="card"><div class="empty">还没有数据</div></div>';
       el.innerHTML = html;
       bindUsage();
       return;
@@ -1580,20 +1580,20 @@
       (function () {
         var st2 = rawLoad();
         if (!st2.rows.length) return '';
-        return '<div class="note" style="margin-top:6px">本机已存 <b class="mono" style="color:#e6edf3">' + fmtInt(st2.rows.length) +
-          '</b> 条日志 · 覆盖 <span class="mono" style="color:#9fb3c8">' + fmtShort(st2.since) + ' → ' + fmtShort(st2.newest) +
-          '</span>（下次只补更新的，不重扫）</div>';
+        return '<div class="note" style="margin-top:6px">本机 <b class="mono" style="color:#e6edf3">' + fmtInt(st2.rows.length) +
+          '</b> 条 · <span class="mono" style="color:#9fb3c8">' + fmtShort(st2.since) + ' → ' + fmtShort(st2.newest) +
+          '</span></div>';
       })() +
       '<div class="note" style="margin-top:8px">输入 ' + fmtTok(agg.prompt) + ' · 输出 ' + fmtTok(agg.completion) +
-      (agg.filling ? ' · 后台正在补齐更早的日志，补完会自动刷新，不用手动重读' : '') +
-      (agg.capped ? ' · 已达翻页上限，可到设置调大' : '') +
-      (agg.partial ? ' · 第 ' + (agg.pages + 1) + ' 页失败（' + esc(agg.partial) + '），以上为前 ' + agg.pages + ' 页的合计' : '') + '</div>' +
+      (agg.filling ? ' · 补齐中' : '') +
+      (agg.capped ? ' · 已达翻页上限，去设置调大' : '') +
+      (agg.partial ? ' · 第 ' + (agg.pages + 1) + ' 页失败（' + esc(agg.partial) + '）' : '') + '</div>' +
       '</div>';
 
     var keys = Object.keys(agg.byKey).map(function (k) { return { k: k, v: agg.byKey[k] }; })
       .sort(function (a, b) { return b.v.tokens - a.v.tokens; });
     html += '<div class="card"><div class="card-h"><div class="card-t">按令牌</div><span class="pill mute">' + keys.length + ' 个</span></div>';
-    if (!keys.length) html += '<div class="empty">窗口内没有请求</div>';
+    if (!keys.length) html += '<div class="empty">没有请求</div>';
     var maxK = keys.length ? (keys[0].v.tokens || 1) : 1;
     keys.forEach(function (x) {
       var pct = Math.max(2, Math.round(x.v.tokens / (agg.total || maxK) * 100));
@@ -1609,7 +1609,7 @@
     var models = Object.keys(agg.byModel).map(function (k) { return { k: k, v: agg.byModel[k] }; })
       .sort(function (a, b) { return b.v.tokens - a.v.tokens; });
     html += '<div class="card"><div class="card-h"><div class="card-t">按模型</div><span class="pill mute">' + models.length + ' 个</span></div>';
-    if (!models.length) html += '<div class="empty">窗口内没有请求</div>';
+    if (!models.length) html += '<div class="empty">没有请求</div>';
     var maxM = models.length ? (models[0].v.tokens || 1) : 1;
     models.forEach(function (x) {
       var pct = Math.max(2, Math.round(x.v.tokens / (agg.total || maxM) * 100));
@@ -1619,11 +1619,6 @@
         '<div class="val mono" style="padding-left:10px">' + fmtTok(x.v.tokens) + '</div></div>';
     });
     html += '</div>';
-
-    html += '<div class="card"><div class="note">统计口径：逐页拉取 NewAPI /api/log/（每页 100 条）后落到本机日志仓，' +
-      '今天 / 24 小时 / 7 天 都从这份数据本地重算 —— 切范围不发请求；后台只增量补新。' +
-      '一条日志 = 一次请求。窗口内请求持续增长，数字为快照时刻结果（' +
-      (agg.at ? hhmmss(agg.at) : '—') + '）。</div></div>';
 
     el.innerHTML = html;
     bindUsage();
