@@ -3,6 +3,16 @@
 
   var LS_KEY = 'tokendesk.cfg.v1';
   var CHAN_MIG = 'tokendesk.chanmig.v1';   // 一次性通道迁移标记：置 '1' 后永不重复迁移
+
+  // ── 应用内更新检查的常量 ────────────────────────────────────
+  // 版本源放 GitHub Releases：tag 和附件天然同步，不需要手工维护 version.json，
+  // 也就没有「忘了改清单 → 静默不提示」这种错。该 API 带 ACAO:*，file:// 页面能直读
+  // （CSP 的 connect-src 已是 http:/https:，见 index.html:6，不用改 CSP）。
+  var UPD_DAY = 'tokendesk.updchecked.v1';  // 自动检查的「今天查过」标记，值 YYYY-MM-DD
+  var UPD_URLS = [
+    'https://api.github.com/repos/jianji112/token-desk/releases/latest'
+  ];
+  var UPD_TIMEOUT_MS = 4000;
   var PRESETS = {
     public: { newapiBase: '__PRESET_PUBLIC_NEWAPI__', hubBase: '__PRESET_PUBLIC_HUB__' },
     lan:    { newapiBase: '__PRESET_LAN_NEWAPI__',    hubBase: '__PRESET_LAN_HUB__' }
@@ -1994,6 +2004,138 @@
   // 壳内浏览器内核直连只对显式返回 CORS 头的服务端可用，所以壳内绝不把 https 用户往 auto 引。
   function inShell() { return !!window.NativeBridge; }
 
+  // ─────────────────────────────────────────── 应用内更新检查（只提示，不自动下载）
+  // 行为约定：有新版本只在设置页显示一行 + 可复制下载地址；不弹窗、不自动下载、
+  // 不走 errBox；网络失败静默（手动查失败才给一句 toast）。不改 Java、不跳浏览器。
+  var UPD = { state: 'idle', cur: '', tag: '', url: '', notes: '', at: 0 };
+
+  function curVer() {
+    var info = null;
+    try {
+      info = (window.NativeBridge && window.NativeBridge.appInfo) ? JSON.parse(window.NativeBridge.appInfo()) : null;
+    } catch (e) { info = null; }
+    var v = info && info.version ? String(info.version).replace(/^v/i, '').trim() : '';
+    return v === 'web' ? '' : v;   // 纯浏览器里 version 是 'web'，没有可比的真版本
+  }
+
+  // 点分段补零逐段数字比（1.0.9 < 1.0.10 必须成立，所以绝不能按字符串比）。
+  // 返回 -1（a 比 b 老）/ 0 / 1；任一侧取不到数字段就返回 0：不可比时宁可不提示有新版本。
+  function verCmp(a, b) {
+    function segs(v) {
+      var m = String(v == null ? '' : v).match(/\d+(?:\.\d+)*/);
+      return m ? m[0].split('.').map(function (x) { return parseInt(x, 10) || 0; }) : null;
+    }
+    var x = segs(a), y = segs(b);
+    if (!x || !y) return 0;
+    for (var i = 0, n = Math.max(x.length, y.length); i < n; i++) {
+      var p = i < x.length ? x[i] : 0, q = i < y.length ? y[i] : 0;
+      if (p !== q) return p < q ? -1 : 1;
+    }
+    return 0;
+  }
+
+  // 「今天」串一律由传进来的时间戳（Date.now 被 harness 冻结时即为冻结值）推出。
+  // 直接 new Date() 会读真实时钟，冻结时钟就失效了 —— 与签到判定同一口径。
+  function updDay(ts) {
+    var d = new Date(ts == null ? Date.now() : ts);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
+
+  function updLine() {
+    if (UPD.state === 'checking') return '检查中…';
+    if (UPD.state === 'new') return '发现新版本 v' + UPD.tag + '（当前 ' + UPD.cur + '）';
+    if (UPD.state === 'latest') return '已是最新（v' + UPD.cur + '）';
+    return '未检查';   // idle / fail 都是「没查到」：失败不写错，也不吓人
+  }
+
+  function updNotes() {
+    if (UPD.state !== 'new') return '';
+    var t = String(UPD.notes || '').split('\n')[0].trim();
+    return t.length > 200 ? t.slice(0, 200) + '…' : t;
+  }
+
+  // 只贴这一小块 DOM，不整页重渲染：否则检查完会把用户正在填的输入和滚动位置冲掉
+  function updPaint() {
+    var line = $('#upd-line');
+    if (!line) return;   // 不在设置页
+    line.textContent = updLine();
+    var btn = $('#f-updcheck');
+    if (btn) { btn.disabled = UPD.state === 'checking'; btn.textContent = UPD.state === 'checking' ? '检查中…' : '检查更新'; }
+    var cp = $('#f-updcopy');
+    if (cp) cp.style.display = (UPD.state === 'new' && UPD.url) ? '' : 'none';
+    var note = $('#upd-note');
+    if (note) {
+      var t = updNotes();
+      note.textContent = t;
+      note.style.display = t ? '' : 'none';
+    }
+  }
+
+  // 取一个端点：4s 超时；失败/超时/非 2xx/解析失败一律 reject，由调用方决定要不要换下一个
+  function updFetch(url) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var timer = setTimeout(function () { done = true; reject(new Error('timeout')); }, UPD_TIMEOUT_MS);
+      function fail(e) { if (done) return; done = true; clearTimeout(timer); reject(e || new Error('fail')); }
+      function ok(j) { if (done) return; done = true; clearTimeout(timer); resolve(j); }
+      try {
+        // 必须就地写 window.fetch(...)：裸 fetch 变量在浏览器里 this 不对会 Illegal invocation，
+        // 就近取也让 preSeed 里的 fetch 桩拦得住（不被闭包提前固定成真 fetch）
+        window.fetch(url, { cache: 'no-store' })
+          .then(function (r) {
+            if (!r || !r.ok) return fail(new Error('HTTP ' + (r && r.status)));
+            return r.json();
+          })
+          .then(ok, fail);
+      } catch (e) { fail(e); }
+    });
+  }
+
+  function checkUpdate(opts) {
+    opts = opts || {};
+    var cur = opts.cur != null ? String(opts.cur) : curVer();
+    var urls = (opts.urls && opts.urls.length) ? opts.urls : UPD_URLS;
+    if (!cur) { updPaint(); return Promise.resolve(UPD); }   // 拿不到真实版本 → 静默不做
+    if (UPD.state === 'checking') return Promise.resolve(UPD);
+    var today = updDay(Date.now());
+    // 同一自然日只查一次（手动点「检查更新」传 force:true 绕过）。
+    // 失败也写标记：GitHub 未认证配额 60 次/小时/IP，弱网用户每次冷启都打一次会被打穿。
+    if (!opts.force) {
+      try { if (localStorage.getItem(UPD_DAY) === today) { updPaint(); return Promise.resolve(UPD); } } catch (e) { }
+    }
+    function mark() { try { localStorage.setItem(UPD_DAY, today); } catch (e) { } }
+    UPD.state = 'checking'; UPD.cur = cur;
+    updPaint();
+    function tryAt(i) {
+      if (i >= urls.length) return Promise.reject(new Error('all endpoints failed'));
+      return updFetch(urls[i]).catch(function () { return tryAt(i + 1); });
+    }
+    return tryAt(0).then(function (j) {
+      UPD.at = Date.now();
+      UPD.tag = String((j && j.tag_name) || '').replace(/^v/i, '').trim();   // 预发布后缀忽略：我们不发预发布
+      UPD.url = (j && j.html_url) || '';
+      UPD.notes = (j && j.body) || '';
+      UPD.state = (UPD.tag && verCmp(cur, UPD.tag) < 0) ? 'new' : 'latest';
+      mark();
+      updPaint();
+      return UPD;
+    }, function (e) {
+      UPD.state = 'fail';
+      mark();
+      updPaint();
+      return UPD;
+    });
+  }
+
+  function autoUpd() {
+    // 三重门：真 App 壳内才发请求（有桥 + file://）、拿得到真实版本、同日没查过（后者在 checkUpdate 里）。
+    // file:// 这一条不是多余：harness 和桌面调试页都用 http 打开本页，很多用例会桩 NativeBridge，
+    // 只判 !!NativeBridge 会让每次冷启动都往 GitHub 打一次 —— 测试不该有真网出口。
+    if (!inShell()) return Promise.resolve(UPD);
+    if (typeof location !== 'undefined' && location.protocol !== 'file:') return Promise.resolve(UPD);
+    return checkUpdate({});
+  }
+
   function isConflicted() {
     return /^https:/i.test(CFG.newapiBase || '') && CFG.channel === 'native';
   }
@@ -2103,6 +2245,12 @@
       (window.NativeBridge && window.NativeBridge.http ? '原生桥可用' : '无原生桥（纯浏览器）') + '</span></div>' +
       '<div class="kv"><span class="k">当前 NewAPI</span><span class="v mono" style="font-size:11px">' + esc(CFG.newapiBase) + '</span></div>' +
       '<div class="kv"><span class="k">当前 账号池</span><span class="v mono" style="font-size:11px">' + esc(CFG.hubBase) + '</span></div>' +
+      // 更新检查：状态一行 + 手动查一次 + 有新版才露出的「复制下载地址」。
+      // 初始态由 updPaint() 在绑定处贴一次，三态（未检查/已是最新/发现新版本）只有一处真相。
+      '<div class="kv"><span class="k">版本检查</span><span class="v" id="upd-line">' + esc(updLine()) + '</span></div>' +
+      '<div class="tok-acts" style="margin:0 0 10px"><button class="btn ghost" id="f-updcheck" style="height:38px">检查更新</button>' +
+      '<button class="btn ghost" id="f-updcopy" style="height:38px;display:none">复制下载地址</button></div>' +
+      '<div class="note" id="upd-note" style="display:none"></div>' +
       '<div class="hr"></div>' +
       '<div class="note">凭证只存在本机 WebView 的 localStorage 里（未加密）。手机丢失或转手前请在「清除配置」里清空。' +
       '本应用不采集、不上传任何数据，所有请求只发往你填写的地址（公网域名或内网 IP）。</div>' +
@@ -2315,6 +2463,23 @@
         '<div class="sheet-acts"><button class="btn ok" data-sheet="close">关闭</button></div></div>');
       $('[data-sheet="close"]').onclick = hideSheet;
     };
+
+    var updCheckBtn = $('#f-updcheck');
+    if (updCheckBtn) updCheckBtn.onclick = function () {
+      // 手动查走 force：不受「同日只查一次」限制；失败才给一句 toast（自动查失败完全静默）
+      checkUpdate({ force: true }).then(function (u) {
+        if (u.state === 'fail') toast('检查失败，请稍后再试', 'err');
+      });
+    };
+    var updCopyBtn = $('#f-updcopy');
+    if (updCopyBtn) updCopyBtn.onclick = function () {
+      if (!UPD.url) return;
+      // 只复制地址，绝不在 App 里打开浏览器（真机验收第 ⑤ 项：点帮助链接不弹浏览器）
+      if (window.NativeBridge && window.NativeBridge.copy) window.NativeBridge.copy(UPD.url);
+      else if (navigator.clipboard) navigator.clipboard.writeText(UPD.url);
+      toast('下载地址已复制', 'ok');
+    };
+    updPaint();   // 重渲染后把已有状态（检查中/已是最新/发现新版本）贴回新 DOM
 
     $('#f-clear').onclick = function () {
       confirmSheet('清除配置', '将删除本机保存的地址、令牌、面板密码，并清掉 WebView 缓存。', function () {
@@ -2790,6 +2955,9 @@
       setSub(CFG.privacy ? '已隐藏名称' : '已显示名称');
     };
     startAutoRefresh();
+    // 启动后在后台静默查一次更新（延迟 3s，避开冷启动抢资源）。
+    // autoUpd 自己有三重门（壳内/file://、有真实版本、同日没查过），网页版与 harness 里是空转。
+    setTimeout(autoUpd, 3000);
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden && parseInt(CFG.autoRefresh, 10) > 0) {
         if (CFG.newapiToken) { loadOverview(false); loadUsage(CFG.range, false); }
@@ -2917,6 +3085,10 @@
     // 源码里是 __PRESET_*__ 占位 → presetReady() 恒假，「改用内网地址」这类分支在测试里
     // 永远渲染不出来。给个可写引用，才能把「预设就绪」这条路径钉进回归。
     presets: function () { return PRESETS; },
+    // 更新检查（只提示、不自动下载）。checkUpdate 可传 {force:true, cur, urls} 供 harness 定住
+    // 版本号/端点，避免用例依赖真网与真机版本；autoUpd 是启动时那次（三重门在函数内）。
+    checkUpdate: checkUpdate, autoUpd: autoUpd, verCmp: verCmp,
+    upd: function () { return { state: UPD.state, cur: UPD.cur, tag: UPD.tag, url: UPD.url, notes: updNotes(), at: UPD.at }; },
     saveCfg: saveCfg
   };
 
