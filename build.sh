@@ -13,8 +13,9 @@ ENVFILE="${TD_ENV_FILE:-$ROOT/.env}"
 PKG="top.xiaoma.tokendesk"
 
 VERSION_FILE="${TD_VERSION_FILE:-$ROOT/VERSION}"
-# 默认不 bump：开发迭代只出包不改版本号；发版时才显式 TD_BUMP=patch|minor|major
-BUMP="${TD_BUMP:-none}"
+# 默认每次出包都升小版本（主人 2026-10-21 定：1.0.72 → 1.0.73 …）。
+# 要发大版本/中版本时才显式 TD_BUMP=minor|major；确实想复刻同号包用 TD_BUMP=none。
+BUMP="${TD_BUMP:-patch}"
 DRY_RUN="${TD_DRY_RUN:-0}"
 
 V_NAME="1.0.0"; V_CODE="1"
@@ -48,17 +49,9 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 ASSETS_SRC="${TD_ASSETS_DIR:-$APP/assets}"
 ASSETS_DIR="$OUT/assets"
-# 包名带出包时的实际 HEAD（不写死）：同名不同物是真实事故——10-20 的旧包与 Wave B 验收包
-# 版本号完全相同，只靠文件名分不开。带短 commit 后，「这枚包是哪一版」和安装前 sha256 核对
-# 都能一眼对上。工作树不干净时加 -dirty 后缀，让脏树包不可能被当成验收产物。
-GIT_SHORT="$( { git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true; } | tr -d '[:space:]' )"
-GIT_SHORT="${GIT_SHORT:-nogit}"
-GIT_DIRTY=""
-if [ -n "$( { git -C "$ROOT" status --porcelain 2>/dev/null || true; } )" ]; then
-  GIT_DIRTY="-dirty"
-  echo "⚠️ 工作树不干净（HEAD $GIT_SHORT）：包名加 -dirty 后缀，此包不得作为验收产物"
-fi
-APK_NAME="${TD_APK_NAME:-TokenDesk-$VERSION_NAME-$GIT_SHORT$GIT_DIRTY.apk}"
+# 版本号每次出包都会升，文件名只留版本号即可区分（主人 2026-10-21 定：不再带 commit 后缀）。
+# 要追查某枚包对应的代码，看安装后「设置 → 关于」里的版本 + 构建日志里的 sha256。
+APK_NAME="${TD_APK_NAME:-TokenDesk-$VERSION_NAME.apk}"
 echo "📦 包名：$APK_NAME"
 DEBUG_FLAG=""
 [ "${TD_DEBUG:-0}" = "1" ] && DEBUG_FLAG="--debug-mode"
