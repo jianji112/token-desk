@@ -1554,6 +1554,71 @@ const fixtures = [
   },
 
   {
+    id: 'F25',
+    name: '冷却名单以 /accounts 的 modelCooldowns 为准：/usage/remaining 的脏 cooling 行不得显示',
+    // 实测脏数据（2026-10-21）：177****9351 / deepseek-v4.1-flash 在 /usage/remaining 里
+    // cooling=true、used=0、segment start(08:14) > end(00:09)，而 /accounts 里 modelCooldowns 为空。
+    // 显示口径必须回到账号记录：只认真的 modelCooldowns（未过期），冷数/可用数都按它重算。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var NOW = Math.floor(Date.now() / 1000);
+      var EXP = NOW + 36000;
+      __app.state.wb = {
+        at: Date.now(), errors: {},
+        accounts: { accounts: [
+          { uid: 'u177', nickname: '177****9351', realm: 'cn', modelCooldowns: [] },
+          { uid: 'uchen', nickname: '辰', realm: 'cn', modelCooldowns: [{ model: 'deepseek-v4.1-flash', expiresAt: EXP, startedAt: NOW - 600 }] },
+          { uid: 'uintl', nickname: 'intl-acct', realm: 'intl', modelCooldowns: [{ model: 'deepseek-v4.1-flash', expiresAt: EXP, startedAt: NOW - 600 }] }
+        ] },
+        remain: {
+          models: [{ realm: 'cn', model: 'deepseek-v4.1-flash', pairs: 4, available: 2, cooling: 2, unknown: 0, total_remaining: 130969454 }],
+          rows: [
+            { uid: 'u177', nickname: '177****9351', realm: 'cn', model: 'deepseek-v4.1-flash', used: 0, cooling: true, reset_at: EXP },
+            { uid: 'uchen', nickname: '辰', realm: 'cn', model: 'deepseek-v4.1-flash', used: 199863195, cooling: true, reset_at: EXP }
+          ]
+        }
+      };
+      __app.state.remOpen = {};
+      __app.showTab('wb');
+      var view = document.querySelector('[data-view="wb"]');
+      function rowText() {
+        var tr = view.querySelector('tr.rem-row');
+        return tr ? tr.textContent.replace(/\\s+/g, ' ').trim() : '';
+      }
+      var t1 = rowText();
+      var tr1 = view.querySelector('tr.rem-row');
+      if (tr1) tr1.click();                      // 展开冷却名单
+      var det1 = view.querySelector('tr.rem-detail');
+      var d1 = det1 ? det1.textContent.replace(/\\s+/g, ' ').trim() : '';
+
+      // ② /accounts 拉失败 → 退回 remain rows，但 used=0 的脏行仍要被剔除
+      var bak = __app.state.wb.accounts;
+      __app.state.wb.accounts = null;
+      __app.state.remOpen = {};
+      __app.showTab('wb');
+      var t2 = rowText();
+      if (tr1) view.querySelector('tr.rem-row').click();
+      var det2el = view.querySelector('tr.rem-detail');
+      var d2 = det2el ? det2el.textContent.replace(/\\s+/g, ' ').trim() : '';
+      __app.state.wb.accounts = bak;
+
+      return { t1: t1, d1: d1, t2: t2, d2: d2, has177: d1.indexOf('177') >= 0, hasChen: d1.indexOf('辰') >= 0 };
+    })()`,
+    check(out) {
+      return [
+        eq('可用/冷 必须按账号真相重算（4 对 - 1 冷 = 3）', /3 \/ 冷1/.test(out.t1), true),
+        eq('脏行 177****9351 不得进冷却名单', out.has177, false),
+        eq('真在冷却的「辰」必须还在', out.hasChen, true),
+        eq('展开后的名单里也不能出现 177', out.d1.indexOf('177') >= 0, false),
+        eq('/accounts 缺失时退回 remain rows，仍要剔掉 used=0 的脏行（3 / 冷1）', /3 \/ 冷1/.test(out.t2), true),
+        eq('退回路径的名单里也不能出现 177', out.d2.indexOf('177') >= 0, false),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),

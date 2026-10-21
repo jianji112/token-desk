@@ -1728,12 +1728,37 @@
 
   function remKey(m) { return (m.realm || '') + '|' + (m.model || ''); }
 
+  // 冷却的真相以 /accounts 的 modelCooldowns 为准。
+  // /usage/remaining 里的 rows 是按日志推算的，出现过 used=0、窗口 start>end 却标 cooling 的脏数据
+  // （2026-10-21 实测：177****9351 / deepseek-v4.1-flash，hub 账号记录里 modelCooldowns 为空）。
+  function accCoolRows(wb, m) {
+    var now = Math.floor(Date.now() / 1000);
+    var accs = (wb && wb.accounts && wb.accounts.accounts) || [];
+    var mk = nameKey(m.model || '');
+    var out = [];
+    accs.forEach(function (a) {
+      if (!a) return;
+      if ((a.realm || '') !== (m.realm || '')) return;   // 账号只算自己所属区域
+      ((a.modelCooldowns) || []).forEach(function (c) {
+        if (!c || !c.model) return;
+        if (nameKey(c.model) !== mk) return;
+        var exp = num(c.expiresAt);
+        if (!exp || exp <= now) return;
+        out.push({ nickname: a.nickname, uid: a.uid, reset_at: exp });
+      });
+    });
+    return out.sort(function (x, y) { return num(x.reset_at) - num(y.reset_at); });
+  }
+
+  // 保底路径：/accounts 拉失败时退回 /usage/remaining 的 rows，
+  // 但只认「窗口内真的用掉了额度」的行（used>0），否则同一份脏数据会再显示一次。
   function remCoolRows(wb, m) {
     var rows = (wb && wb.remain && wb.remain.rows) || [];
     var now = Math.floor(Date.now() / 1000);
     var mk = nameKey(m.model || '');
     return rows.filter(function (r) {
       if (!r || !r.cooling) return false;
+      if (num(r.used) <= 0) return false;
       if (num(r.reset_at) <= now) return false;
       if ((r.realm || '') !== (m.realm || '')) return false;
       return r.model === m.model || nameKey(r.model || '') === mk;
@@ -1907,7 +1932,11 @@
       shown.forEach(function (m) {
         var ok = num(m.available) > 0;
         var hit = usedReq24(used24, m.model, m.realm);
-        var cools = num(m.cooling) > 0 ? remCoolRows(wb, m) : [];
+        // accounts 拿到就用它（权威）；拿不到才退回 /usage/remaining 的推算行
+        var hasAcc = !!(wb.accounts && wb.accounts.accounts && wb.accounts.accounts.length);
+        var cools = hasAcc ? accCoolRows(wb, m) : remCoolRows(wb, m);
+        var coolN = cools.length;
+        var availN = num(m.pairs) > 0 ? Math.max(0, num(m.pairs) - coolN - num(m.unknown)) : num(m.available);
         var rk = remKey(m);
         var open = cools.length > 0 && !!(S.remOpen && S.remOpen[rk]);
         html += '<tr' + (cools.length ? ' class="rem-row' + (open ? ' open' : '') + '" data-act="rem-toggle" data-key="' + esc(rk) + '"' : '') +
@@ -1915,7 +1944,7 @@
           (cools.length ? '<span class="rem-caret">▸</span>' : '') + '</td>' +
           '<td><span class="pill ' + (m.realm === 'cn' ? 'info' : 'mute') + '">' + esc(m.realm || '?') + '</span></td>' +
           '<td class="mono" style="text-align:right">' + (hit > 0 ? fmtInt(hit) : '—') + '</td>' +
-          '<td class="mono">' + (m.cooling ? '<span class="pill warn">' + num(m.available) + ' / 冷' + num(m.cooling) + '</span>'
+          '<td class="mono">' + (coolN ? '<span class="pill warn">' + availN + ' / 冷' + coolN + '</span>'
             : '<span class="pill ' + (ok ? 'ok' : 'off') + '">' + num(m.available) + '</span>') + '</td>' +
           '<td class="mono">' + (m.total_remaining == null || num(m.total_remaining) === 0 ? '—' : fmtTok(m.total_remaining)) + '</td></tr>';
         if (open) {
