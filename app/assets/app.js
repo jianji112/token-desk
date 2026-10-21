@@ -2013,9 +2013,6 @@
       });
     }
 
-    html += '<div class="card"><div class="note">数据源：hub 面板 /health、/accounts?realm=all、/scheduler、/v1/models、/usage/remaining、/usage/analytics。' +
-      '更新于 ' + (wb.at ? hhmmss(wb.at) : '—') + '。</div></div>';
-
     var keepTop = el.scrollTop;
     el.innerHTML = html;
     if (keepTop) el.scrollTop = keepTop;
