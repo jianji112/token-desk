@@ -1450,6 +1450,110 @@ const fixtures = [
   },
 
   {
+    id: 'F24',
+    name: '更新结论落盘：同日重开仍显示上次结论 + 「今天 HH:MM 查过」；跨天/换版本/失败一律作废',
+    // 「只查一次」+「结论只在内存」= 用户刚查完、关掉再开就看到「未检查」，像坏了。
+    // 落盘必须严格：同一天 + 同一版本 + 结论是 latest/new，三条同时满足才认；否则丢弃。
+    // 失败不是结论：checkUpdate 失败时不许写回，也不许把上一次成功结论顶掉。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = {
+        appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); },
+        copy: function (t) { window.__COPIED = t; }
+      };
+      (function () {
+        var real = window.fetch;
+        window.__UPDCALLS = [];
+        window.__MODE = 'latest';
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__UPDCALLS.push(s);
+          if (window.__MODE === 'fail') return Promise.reject(new Error('net down'));
+          var tag = window.__MODE === 'new' ? 'v1.0.73' : 'v1.0.72';
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({ tag_name: tag, html_url: 'https://example.invalid/tag/' + tag, body: 'x' });
+          } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      function p2(n) { return n < 10 ? '0' + n : '' + n; }
+      function dayOf(ts) { var d = new Date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); }
+      function line() { var e = document.getElementById('upd-line'); return e ? e.textContent : null; }
+      function atEl() { var e = document.getElementById('upd-at'); return e ? { text: e.textContent, shown: e.style.display !== 'none' } : null; }
+      // 重渲染 = 模拟冷启动后用户点进设置页；restore 必须发生在画 #upd-line 之前
+      function rerender() { __app.showTab('usage'); __app.showTab('settings'); }
+      var URLS = ['https://example.invalid/releases/latest'];
+      var NOWMS = Date.now(), TODAY = dayOf(NOWMS), YEST = dayOf(NOWMS - 86400000);
+      var d = new Date(NOWMS), HM = p2(d.getHours()) + ':' + p2(d.getMinutes());
+
+      __app.showTab('settings');
+      var line0 = line(), at0 = atEl();
+
+      window.__MODE = 'latest';
+      await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });
+      var st0 = __app.upd().state, store = __app.updStore();
+
+      __app.updForget();                       // 内存抹平 = 冷启动
+      rerender();
+      var line1 = line(), at1 = atEl(), st1 = __app.upd().state;
+
+      var o1 = __app.updStore() || {}; o1.day = YEST;   // 跨天：昨天的结论不许冒充今天
+      localStorage.setItem('tokendesk.updlast.v1', JSON.stringify(o1));
+      __app.updForget();
+      rerender();
+      var line2 = line(), at2 = atEl(), st2 = __app.upd().state;
+
+      var o2 = __app.updStore() || {}; o2.day = TODAY; o2.cur = '1.0.71';  // 换过版本：旧版本结论作废
+      localStorage.setItem('tokendesk.updlast.v1', JSON.stringify(o2));
+      __app.updForget();
+      rerender();
+      var line3 = line(), st3 = __app.upd().state;
+
+      var beforeFail = localStorage.getItem('tokendesk.updlast.v1');
+      window.__MODE = 'fail';
+      __app.updForget();
+      await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });
+      var st4 = __app.upd().state;
+      var afterFail = localStorage.getItem('tokendesk.updlast.v1');
+
+      return {
+        line0: line0, at0: at0, st0: st0, store: store,
+        line1: line1, at1: at1, st1: st1,
+        line2: line2, at2: at2, st2: st2,
+        line3: line3, st3: st3,
+        st4: st4, sameAfterFail: beforeFail === afterFail, line4: line(),
+        today: TODAY, hm: HM, fetches: window.__UPDCALLS.length
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('起手：没查过就是「未检查」', out.line0, '未检查'),
+        eq('起手：没有结论就没有「查过」时间行', out.at0.shown, false),
+        eq('checkUpdate 成功 → latest', out.st0, 'latest'),
+        eq('盘上必须有结论（重启才接得上）', !!out.store, true),
+        eq('盘上记的是今天', out.store && out.store.day, out.today),
+        eq('盘上记的是当前版本', out.store && out.store.cur, '1.0.72'),
+        eq('盘上记的结论是 latest', out.store && out.store.state, 'latest'),
+        eq('盘上记的时间戳 = 这次检查的时间', out.store && out.store.at, 1761000000 * 1000),
+        eq('重开（内存抹平 + 重渲染）后仍显示上次结论', out.line1, '已是最新（v1.0.72）'),
+        eq('重开后内存态也是 latest（不是只贴了一段文字）', out.st1, 'latest'),
+        eq('「今天 HH:MM 查过」独立一行且真的显示', out.at1.text, '今天 ' + out.hm + ' 查过'),
+        eq('时间行确实可见（不是被 display:none 藏住）', out.at1.shown, true),
+        eq('跨天的结论一律作废（不拿昨天冒充今天）', out.line2, '未检查'),
+        eq('跨天作废后内存态回 idle', out.st2, 'idle'),
+        eq('跨天时连时间行也不许留', out.at2.shown, false),
+        eq('版本变了的结论作废（1.0.71 的结论不喂给 1.0.72）', out.line3, '未检查'),
+        eq('版本不符后内存态回 idle', out.st3, 'idle'),
+        eq('网络失败 → 状态 fail', out.st4, 'fail'),
+        eq('失败不写回盘上（失败不是结论）', out.sameAfterFail, true),
+        eq('失败时结论行回到「未检查」', out.line4, '未检查'),
+        eq('一次成功 + 一次失败 = 恰好两次请求', out.fetches, 2),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
