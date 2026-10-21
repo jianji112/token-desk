@@ -197,9 +197,9 @@ tr.rem-row.open .rem-caret{transform:rotate(90deg);color:var(--warn)}
 .tok-h{display:flex;align-items:center;gap:6px}
 .tok-name{font-weight:700;font-size:13.5px;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tok-b{
-  flex:0 0 auto;height:26px;padding:0 9px;border-radius:8px;
+  flex:0 0 auto;height:30px;padding:0 10px;border-radius:9px;
   border:1px solid var(--line);background:var(--card-2);color:var(--dim);
-  font-size:11.5px;font-weight:600;
+  font-size:12px;font-weight:600;
 }
 .tok-b:active{background:#1e2936;color:var(--txt)}
 .tok-b.ok{color:#bbf7d0;border-color:rgba(74,222,128,.32)}
