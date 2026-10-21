@@ -1806,7 +1806,8 @@ const fixtures = [
         var TOKS = [
           { id: 1, name: '何薛宝', status: 1, created_time: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '', used_quota: 60985055487, accessed_time: 300 },
           { id: 2, name: 'Hermes', status: 2, created_time: 2, expired_time: 9999999999, remain_quota: 500000, unlimited_quota: false, model_limits_enabled: false, model_limits: '', used_quota: 1000000, accessed_time: 100 },
-          { id: 3, name: '工作号', status: 1, created_time: 3, expired_time: 9999999999, remain_quota: 900000, unlimited_quota: false, model_limits_enabled: false, model_limits: '', used_quota: 2000000, accessed_time: 200 }
+          { id: 3, name: '工作号', status: 1, created_time: 3, expired_time: 9999999999, remain_quota: 900000, unlimited_quota: false, model_limits_enabled: false, model_limits: '', used_quota: 2000000, accessed_time: 200 },
+          { id: 4, name: '备用', status: 1, created_time: 4, expired_time: 9999999999, remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '', used_quota: 5000, accessed_time: 50 }
         ];
         function J(o) { return Promise.resolve({ ok: true, status: 200, text: function () { return Promise.resolve(JSON.stringify(o)); } }); }
         var real = window.fetch;
@@ -1859,9 +1860,12 @@ const fixtures = [
         eq('默认档位「按消耗」', out.lbl0, '按消耗'),
         eq('默认按消耗排序（何薛宝在最前）', out.n0[0], '何薛宝'),
         eq('累计金额用紧凑单位（带「万」）', out.acc0.indexOf('万') >= 0, true),
-        eq('点一下换「按剩余」（无限额度排最前）', out.lbl1 + '|' + out.n1[0], '按剩余|何薛宝'),
+        // 两枚「无限额度」相减会给 Infinity-Infinity=NaN，比较器返回 NaN 时顺序未定义；
+        // 期望：无限在前（内部按已用降序），再按剩余从多到少
+        eq('按剩余：无限额度在前，且两枚无限按已用降序（何薛宝 → 备用）', out.n1.slice(0, 2).join(','), '何薛宝,备用'),
+        eq('按剩余：非无限按剩余从多到少（工作号 900000 > Hermes 500000）', out.n1.slice(2).join(','), '工作号,Hermes'),
         eq('再点换「按最近」（accessed 最大的何薛宝）', out.lbl2 + '|' + out.n2[0], '按最近|何薛宝'),
-        eq('再点换「按名称」（拼音序 工作号）', out.lbl3 + '|' + out.n3[0], '按名称|工作号'),
+        eq('再点换「按名称」（拼音序首条 备用）', out.lbl3 + '|' + out.n3[0], '按名称|备用'),
         eq('再点回到「按消耗」', out.lbl4 + '|' + out.n4[0], '按消耗|何薛宝'),
         eq('切页签回来档位保持', out.lbl5, '按消耗'),
         eq('排序写回配置', out.sort, 'usage'),

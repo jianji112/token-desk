@@ -1463,8 +1463,11 @@
       if (sortKey === 'name') return String(a.name).localeCompare(String(b.name), 'zh');
       if (sortKey === 'recent') return num(b.accessed) - num(a.accessed);
       if (sortKey === 'quota') {
-        var qa = a.unlimited ? Infinity : num(a.remain), qb = b.unlimited ? Infinity : num(b.remain);
-        return qb - qa;
+        var qa = a.unlimited ? Infinity : num(a.remain);
+        var qb = b.unlimited ? Infinity : num(b.remain);
+        // 必须显式判等：Infinity - Infinity = NaN，比较器返回 NaN 会让顺序变成未定义（实测过）
+        if (qa !== qb) return qb - qa;
+        return num(b.used) - num(a.used);
       }
       var wa = win(a), wb2 = win(b);
       var va = wa ? num(wa.tokens) : 0, vb = wb2 ? num(wb2.tokens) : 0;
