@@ -48,7 +48,18 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 ASSETS_SRC="${TD_ASSETS_DIR:-$APP/assets}"
 ASSETS_DIR="$OUT/assets"
-APK_NAME="${TD_APK_NAME:-TokenDesk-$VERSION_NAME.apk}"
+# 包名带出包时的实际 HEAD（不写死）：同名不同物是真实事故——10-20 的旧包与 Wave B 验收包
+# 版本号完全相同，只靠文件名分不开。带短 commit 后，「这枚包是哪一版」和安装前 sha256 核对
+# 都能一眼对上。工作树不干净时加 -dirty 后缀，让脏树包不可能被当成验收产物。
+GIT_SHORT="$( { git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true; } | tr -d '[:space:]' )"
+GIT_SHORT="${GIT_SHORT:-nogit}"
+GIT_DIRTY=""
+if [ -n "$( { git -C "$ROOT" status --porcelain 2>/dev/null || true; } )" ]; then
+  GIT_DIRTY="-dirty"
+  echo "⚠️ 工作树不干净（HEAD $GIT_SHORT）：包名加 -dirty 后缀，此包不得作为验收产物"
+fi
+APK_NAME="${TD_APK_NAME:-TokenDesk-$VERSION_NAME-$GIT_SHORT$GIT_DIRTY.apk}"
+echo "📦 包名：$APK_NAME"
 DEBUG_FLAG=""
 [ "${TD_DEBUG:-0}" = "1" ] && DEBUG_FLAG="--debug-mode"
 
@@ -150,7 +161,10 @@ APK="$DIST/$APK_NAME"
 "$BT/apksigner" verify --print-certs "$APK" | head -4
 
 SIZE="$(du -h "$APK" | cut -f1)"
+APK_SHA256="$(sha256sum "$APK" | cut -d' ' -f1)"
 echo "✅ 构建完成: $APK ($SIZE)"
+echo "🔐 APK sha256：$APK_SHA256"
+echo "   安装前硬校验：sha256sum \"$APK\" 必须等于上面这串（设备上 pm path 拉回的包也要一致才允许覆盖安装）"
 
 if [ "$BUMP" = "none" ]; then
   echo "🔖 bump=none：不写回 $VERSION_FILE（版本仍为 $VERSION_NAME / code $VERSION_CODE）"
