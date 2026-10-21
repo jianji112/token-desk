@@ -129,6 +129,9 @@ body{
 .pill.warn{background:rgba(251,191,36,.1);color:#fcd34d;border-color:rgba(251,191,36,.28)}
 .pill.info{background:rgba(56,189,248,.1);color:#7dd3fc;border-color:rgba(56,189,248,.28)}
 .pill.mute{background:rgba(255,255,255,.05);color:var(--dim);border-color:var(--line)}
+/* 可点的胶囊（概览时间范围、令牌排序）：默认 pill 不带手型，必须显式给，否则看不出能点 */
+.pill[data-act]{cursor:pointer;user-select:none}
+.pill[data-act]:active{opacity:.75}
 
 .bar{height:6px;border-radius:99px;background:rgba(255,255,255,.06);overflow:hidden;margin-top:7px}
 .bar > i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--acc),#22d3ee)}

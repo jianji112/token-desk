@@ -36,9 +36,7 @@
     maxPages: '80',
     channel: 'native',
     shareBase: '',        // 分享给朋友用的接口地址（留空=跟随构建期预设或 newapiBase）
-    tokQuery: '',         // 令牌列表搜索词
-    tokFilter: 'all',     // all|on|off|exp
-    tokSort: 'usage',     // usage|quota|recent|name
+    tokSort: 'usage',     // 令牌列表排序：usage|quota|recent|name
     autoRefresh: '60',
     prefetch: '1',
     accRealm: 'all',
@@ -1430,66 +1428,37 @@
     }
 
     html += '<div class="card"><div class="card-h"><div class="card-t">令牌列表</div>' +
+      '<span class="pill info tok-sortpill" data-act="tok-sort" title="点一下换排序">' +
+      TOK_SORTS.map(function (o) { return o[0] === tokSortKey() ? o[1] : ''; }).join('') + '</span>' +
       '<button class="tok-b ok" data-act="tok-new">＋ 新建</button></div>' +
-      '<div class="tok-tools">' +
-      '<input id="tok-q" type="search" placeholder="搜名称" value="' + esc(CFG.tokQuery || '') + '">' +
-      '<select id="tok-sort">' +
-      [['usage', '按消耗'], ['quota', '按剩余'], ['recent', '按最近'], ['name', '按名称']].map(function (o) {
-        return '<option value="' + o[0] + '" ' + ((CFG.tokSort || 'usage') === o[0] ? 'selected' : '') + '>' + o[1] + '</option>';
-      }).join('') + '</select></div>' +
-      '<div class="seg" style="margin:0 0 8px">' +
-      [['all', '全部'], ['on', '启用'], ['off', '停用'], ['exp', '将过期']].map(function (o) {
-        return '<button data-act="tok-filter" data-f="' + o[0] + '" class="' + ((CFG.tokFilter || 'all') === o[0] ? 'on' : '') + '">' + o[1] + '</button>';
-      }).join('') + '</div>' +
       '<div id="tok-list"></div></div>';
 
     html += '</div>';
     el.innerHTML = html;
     paintTokList();
-
-    // 搜索框：只重画列表，不整页重画（否则每敲一个字都丢焦点）
-    var qEl = $('#tok-q');
-    if (qEl) {
-      var qTimer = null;
-      qEl.oninput = function () {
-        CFG.tokQuery = qEl.value;
-        if (qTimer) clearTimeout(qTimer);
-        qTimer = setTimeout(function () { qTimer = null; saveCfg(); paintTokList(); }, 120);
-      };
-      qEl.onchange = function () { saveCfg(); paintTokList(); };
-    }
-    var sortEl = $('#tok-sort');
-    if (sortEl) sortEl.onchange = function () {
-      CFG.tokSort = sortEl.value;
-      saveCfg();
-      paintTokList();
-    };
   }
 
-  // 只重画列表容器：搜索框每敲一个字都要重排，整页 innerHTML 重画会丢焦点/光标。
+  // 排序档位：只有这一个控件（搜索/筛选按主人要求去掉）
+  var TOK_SORTS = [['usage', '按消耗'], ['quota', '按剩余'], ['recent', '按最近'], ['name', '按名称']];
+  function tokSortKey() {
+    for (var i = 0; i < TOK_SORTS.length; i++) if (TOK_SORTS[i][0] === CFG.tokSort) return CFG.tokSort;
+    return 'usage';
+  }
+
+  // 只重画列表容器：排序切换时不整页重画（避免冲掉滚动位置与顶部状态）
   function paintTokList() {
     var box = $('#tok-list');
     if (!box) return;
     if (!S.tokens || !S.tokens.length) { box.innerHTML = '<div class="empty">没有令牌</div>'; return; }
     var usage = S.usageLive || S.usage;
     var now = Date.now();
-    var q = String(CFG.tokQuery || '').trim().toLowerCase();
-    var f = CFG.tokFilter || 'all';
-    var sortKey = CFG.tokSort || 'usage';
-    var soon = now + 7 * 86400 * 1000;
+    var sortKey = tokSortKey();
 
     function win(t) {
       if (!usage || !usage.byKey) return null;
       return usage.byKey['#' + t.id] || usage.byKey[t.name] || null;
     }
-    var list = S.tokens.filter(function (t) {
-      if (q && String(t.name).toLowerCase().indexOf(q) < 0) return false;
-      var exp = t.expired > 0 ? t.expired * 1000 : 0;
-      if (f === 'on' && t.status !== 1) return false;
-      if (f === 'off' && t.status === 1) return false;
-      if (f === 'exp' && !(exp && exp < soon)) return false;
-      return true;
-    });
+    var list = S.tokens.slice();
     list.sort(function (a, b) {
       if (sortKey === 'name') return String(a.name).localeCompare(String(b.name), 'zh');
       if (sortKey === 'recent') return num(b.accessed) - num(a.accessed);
@@ -1502,8 +1471,6 @@
       if (vb !== va) return vb - va;
       return num(b.used) - num(a.used);
     });
-
-    if (!list.length) { box.innerHTML = '<div class="empty">没有符合条件的令牌</div>'; return; }
 
     box.innerHTML = list.map(function (t) {
       var w = win(t);
@@ -3471,10 +3438,19 @@
       else if (act === 'edit') openTokenSheet(id);
       else if (act === 'key') copyKey(id);
       if (act === 'tok-new') newTokenSheet();
-      else if (act === 'tok-filter') {
-        CFG.tokFilter = btn.getAttribute('data-f') || 'all';
+      else if (act === 'tok-sort') {
+        // 单档循环：按消耗 → 按剩余 → 按最近 → 按名称 → 回到按消耗
+        var cur = tokSortKey(), nx = 'usage';
+        for (var si = 0; si < TOK_SORTS.length; si++) {
+          if (TOK_SORTS[si][0] === cur) { nx = TOK_SORTS[(si + 1) % TOK_SORTS.length][0]; break; }
+        }
+        CFG.tokSort = nx;
         saveCfg();
-        renderTokens();
+        var lbl = '';
+        TOK_SORTS.forEach(function (o) { if (o[0] === nx) lbl = o[1]; });
+        btn.textContent = lbl;          // 只更新胶囊文字，不整页重画（保住滚动位置）
+        paintTokList();
+        toast('排序：' + lbl, 'ok');
       }
     });
 

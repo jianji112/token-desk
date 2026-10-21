@@ -1799,10 +1799,9 @@ const fixtures = [
 
   {
     id: 'F28',
-    name: '令牌列表：搜索只重画列表（不丢焦点）、状态筛选、四种排序、累计用紧凑单位',
+    name: '令牌列表：只有排序（无搜索/无筛选）、点胶囊循环四档、累计用紧凑单位',
     cfg: (port) => baseCfg(port, { channel: 'browser' }),
     preSeed: `
-      window.__COPIED = [];
       (function () {
         var TOKS = [
           { id: 1, name: '何薛宝', status: 1, created_time: 1, expired_time: -1, remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '', used_quota: 60985055487, accessed_time: 300 },
@@ -1822,61 +1821,50 @@ const fixtures = [
     run: `(async () => {
       await __app.loadOverview(true);
       __app.showTab('tokens');
+      var view = document.querySelector('[data-view="tokens"]');
       function names() {
         var box = document.getElementById('tok-list');
         return box ? Array.prototype.map.call(box.querySelectorAll('.tok .tok-name'), function (e) { return e.textContent; }) : [];
       }
-      function fire(el) { el.dispatchEvent(new Event('change', { bubbles: true })); }
-      var n0 = names();
-      var acc0 = document.querySelector('#tok-list .tok-line').textContent;
+      function pill() { return view.querySelector('[data-act="tok-sort"]'); }
+      var hasSearch = !!document.getElementById('tok-q');
+      var hasSelect = !!document.getElementById('tok-sort');
+      var hasFilter = !!view.querySelector('[data-act="tok-filter"]');
+      var n0 = names(), lbl0 = pill() ? pill().textContent.trim() : null;
+      var acc0 = view.querySelector('#tok-list .tok-line').textContent;
 
-      // 搜索：只重画列表，输入框还在、值还在
-      var q = document.getElementById('tok-q');
-      q.focus();                       // 真实用户先点进输入框；不聚焦就测不出「重画是否丢焦点」
-      q.value = 'her';
-      if (q.oninput) q.oninput();
-      await new Promise(function (r) { setTimeout(r, 220); });
-      var nSearch = names();
-      var qAlive = !!document.getElementById('tok-q') && document.getElementById('tok-q').value === 'her';
-      var focusKept = document.activeElement === q;
+      pill().click();                                  // 按消耗 → 按剩余
+      var lbl1 = pill().textContent.trim(), n1 = names();
+      pill().click();                                  // → 按最近
+      var lbl2 = pill().textContent.trim(), n2 = names();
+      pill().click();                                  // → 按名称
+      var lbl3 = pill().textContent.trim(), n3 = names();
+      pill().click();                                  // → 回到按消耗
+      var lbl4 = pill().textContent.trim(), n4 = names();
 
-      // 清空搜索 → 全部回来
-      q.value = ''; if (q.oninput) q.oninput();
-      await new Promise(function (r) { setTimeout(r, 220); });
-      var nAll = names();
+      // 切页签回来：排序档位必须还在（写回配置）
+      __app.showTab('overview'); __app.showTab('tokens');
+      var lbl5 = document.querySelector('[data-view="tokens"] [data-act="tok-sort"]').textContent.trim();
 
-      // 状态筛选
-      var offBtn = document.querySelector('[data-act="tok-filter"][data-f="off"]');
-      if (offBtn) offBtn.click();
-      var nOff = names();
-      var allBtn = document.querySelector('[data-act="tok-filter"][data-f="all"]');
-      if (allBtn) allBtn.click();
-
-      // 排序：按名称
-      var sortEl = document.getElementById('tok-sort');
-      sortEl.value = 'name'; if (sortEl.onchange) sortEl.onchange();
-      var nByName = names();
-      // 按剩余（无限额度排最前）
-      sortEl.value = 'quota'; if (sortEl.onchange) sortEl.onchange();
-      var nByQuota = names();
-
-      return { n0: n0, acc0: acc0, nSearch: nSearch, qAlive: qAlive, hasFocus: focusKept,
-               nAll: nAll, nOff: nOff, nByName: nByName, nByQuota: nByQuota,
-               filter: __app.cfg().tokFilter, sort: __app.cfg().tokSort };
+      return { hasSearch: hasSearch, hasSelect: hasSelect, hasFilter: hasFilter,
+               n0: n0, lbl0: lbl0, acc0: acc0,
+               lbl1: lbl1, n1: n1, lbl2: lbl2, n2: n2, lbl3: lbl3, n3: n3, lbl4: lbl4, n4: n4,
+               lbl5: lbl5, sort: __app.cfg().tokSort };
     })()`,
     check(out) {
       return [
-        eq('默认按消耗排序（何薛宝 used 最大在最前）', out.n0[0], '何薛宝'),
-        eq('累计金额用紧凑单位（带「万」，不再是 121,970 这种长串）', out.acc0.indexOf('万') >= 0, true),
-        eq('搜索 her 只留 Hermes（大小写不敏感）', out.nSearch.join(','), 'Hermes'),
-        eq('搜索后输入框还在且值没被清（不是整页重画）', out.qAlive, true),
-        eq('搜索后焦点仍在输入框', out.hasFocus, true),
-        eq('清空搜索 → 3 条全回来', out.nAll.length, 3),
-        eq('筛「停用」只剩 Hermes', out.nOff.join(','), 'Hermes'),
-        eq('按名称排序：拼音序（工作号 → 何薛宝 → Hermes）', out.nByName.join(','), '工作号,何薛宝,Hermes'),
-        eq('按剩余排序：无限额度排最前（何薛宝）', out.nByQuota[0], '何薛宝'),
-        eq('筛选状态写回配置', out.filter, 'all'),
-        eq('排序方式写回配置', out.sort, 'quota'),
+        eq('搜索框必须没了', out.hasSearch, false),
+        eq('原生下拉也必须没了', out.hasSelect, false),
+        eq('筛选按钮必须没了', out.hasFilter, false),
+        eq('默认档位「按消耗」', out.lbl0, '按消耗'),
+        eq('默认按消耗排序（何薛宝在最前）', out.n0[0], '何薛宝'),
+        eq('累计金额用紧凑单位（带「万」）', out.acc0.indexOf('万') >= 0, true),
+        eq('点一下换「按剩余」（无限额度排最前）', out.lbl1 + '|' + out.n1[0], '按剩余|何薛宝'),
+        eq('再点换「按最近」（accessed 最大的何薛宝）', out.lbl2 + '|' + out.n2[0], '按最近|何薛宝'),
+        eq('再点换「按名称」（拼音序 工作号）', out.lbl3 + '|' + out.n3[0], '按名称|工作号'),
+        eq('再点回到「按消耗」', out.lbl4 + '|' + out.n4[0], '按消耗|何薛宝'),
+        eq('切页签回来档位保持', out.lbl5, '按消耗'),
+        eq('排序写回配置', out.sort, 'usage'),
       ];
     },
   },
@@ -1891,8 +1879,6 @@ const fixtures = [
     setup() { state.dynamic = () => ({ items: [], total: 0 }); },
     run: `(async () => {
       function sleep2(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-      // 25 行足够证明「没被砍」：老的降级阈值是 4000，这里换一种更硬的验证——
-      // 直接把 localStorage.setItem 换成抛 QuotaExceeded（模拟配额满），行数必须原样保留。
       var rows = [];
       for (var i = 0; i < 25; i++) rows.push(__T.row(1761000000 - i * 10, i + 1, 5, 'k5', 'gpt-4o', 10, 10, 100));
       __T.seedRaw(rows, { at: 1761000000 * 1000, since: 1761000000 - 300, newest: 1761000000, pages: 1, complete: true });
