@@ -9,6 +9,9 @@
   // 也就没有「忘了改清单 → 静默不提示」这种错。该 API 带 ACAO:*，file:// 页面能直读
   // （CSP 的 connect-src 已是 http:/https:，见 index.html:6，不用改 CSP）。
   var UPD_DAY = 'tokendesk.updchecked.v1';  // 自动检查的「今天查过」标记，值 YYYY-MM-DD
+  // 上一次检查的结论（只存结论，不存「检查中」）。同日重开 App 时设置页要能接着显示
+  // 「已是最新（v1.0.72） · 今天 09:29 查过」——否则用户刚查完、关掉再开就看到「未检查」，像坏了。
+  var UPD_LAST = 'tokendesk.updlast.v1';
   var UPD_URLS = [
     'https://api.github.com/repos/jianji112/token-desk/releases/latest'
   ];
@@ -2054,11 +2057,50 @@
     return t.length > 200 ? t.slice(0, 200) + '…' : t;
   }
 
+  // 「今天 09:29 查过」：时间只从 UPD.at 这个时间戳算，不读当前时钟（时钟被冻结也说得准）
+  function updAtText() {
+    if (!UPD.at || (UPD.state !== 'latest' && UPD.state !== 'new')) return '';
+    var d = new Date(UPD.at);
+    return (updDay(UPD.at) === updDay(Date.now()) ? '今天 ' : updDay(UPD.at) + ' ') +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' 查过';
+  }
+
+  // 结论落盘：只在 latest/new 时写；checking/fail 一律不写回（失败不是结论，不许当结论存）
+  function updSave() {
+    if (UPD.state !== 'latest' && UPD.state !== 'new') return;
+    try {
+      localStorage.setItem(UPD_LAST, JSON.stringify({
+        day: updDay(Date.now()), cur: UPD.cur, tag: UPD.tag, state: UPD.state,
+        url: UPD.url, notes: updNotes(), at: UPD.at
+      }));
+    } catch (e) { }
+  }
+
+  // 取回上次结论。三条必须同时满足：同一天、同一版本、结论是 latest/new；
+  // 任一不满足就整条丢弃、不写回 —— 不拿昨天的结论冒充今天，不拿旧版本的结论冒充当前版本。
+  // 只在内存里没有结论（idle）时才认，免得把用户刚拿到的新结论顶掉。
+  function updRestore() {
+    if (UPD.state !== 'idle') return;
+    var o = null;
+    try { o = JSON.parse(localStorage.getItem(UPD_LAST) || 'null'); } catch (e) { o = null; }
+    if (!o || typeof o !== 'object') return;
+    var cur = curVer();
+    if (!cur || String(o.cur) !== cur || o.day !== updDay(Date.now())) return;
+    if (o.state !== 'latest' && o.state !== 'new') return;
+    UPD = {
+      state: o.state, cur: cur, tag: String(o.tag || ''), url: String(o.url || ''),
+      notes: String(o.notes || ''), at: Number(o.at) || 0
+    };
+  }
+
   // 只贴这一小块 DOM，不整页重渲染：否则检查完会把用户正在填的输入和滚动位置冲掉
   function updPaint() {
     var line = $('#upd-line');
     if (!line) return;   // 不在设置页
     line.textContent = updLine();
+    // 「今天 09:29 查过」单独一行：结论与时间分开，结论行文案不动（既有断言只看结论行）
+    var at = $('#upd-at');
+    if (at) { var s = updAtText(); at.textContent = s; at.style.display = s ? '' : 'none'; }
     var btn = $('#f-updcheck');
     if (btn) { btn.disabled = UPD.state === 'checking'; btn.textContent = UPD.state === 'checking' ? '检查中…' : '检查更新'; }
     var cp = $('#f-updcopy');
@@ -2117,6 +2159,7 @@
       UPD.notes = (j && j.body) || '';
       UPD.state = (UPD.tag && verCmp(cur, UPD.tag) < 0) ? 'new' : 'latest';
       mark();
+      updSave();   // 结论落盘：当天再开 App 时设置页能接着显示，不用重查
       updPaint();
       return UPD;
     }, function (e) {
@@ -2147,6 +2190,7 @@
   }
 
   function renderSettings() {
+    updRestore();   // 必须在任何能画出 #upd-line 的渲染之前：冷启动时内存里没结论，只能从盘上取
     var el = viewEl('settings');
     var info = (window.NativeBridge && window.NativeBridge.appInfo) ? JSON.parse(window.NativeBridge.appInfo()) : { version: 'web', sdk: 0, model: 'browser' };
 
@@ -2248,6 +2292,8 @@
       // 更新检查：状态一行 + 手动查一次 + 有新版才露出的「复制下载地址」。
       // 初始态由 updPaint() 在绑定处贴一次，三态（未检查/已是最新/发现新版本）只有一处真相。
       '<div class="kv"><span class="k">版本检查</span><span class="v" id="upd-line">' + esc(updLine()) + '</span></div>' +
+      // 「今天 09:29 查过」：跟结论同一个时间戳，跨天/换版本就不显示（见 updRestore 的三条门槛）
+      '<div class="note" id="upd-at" style="display:none;margin:-2px 0 8px;color:var(--dim-2)"></div>' +
       '<div class="tok-acts" style="margin:0 0 10px"><button class="btn ghost" id="f-updcheck" style="height:38px">检查更新</button>' +
       '<button class="btn ghost" id="f-updcopy" style="height:38px;display:none">复制下载地址</button></div>' +
       '<div class="note" id="upd-note" style="display:none"></div>' +
@@ -3088,7 +3134,10 @@
     // 更新检查（只提示、不自动下载）。checkUpdate 可传 {force:true, cur, urls} 供 harness 定住
     // 版本号/端点，避免用例依赖真网与真机版本；autoUpd 是启动时那次（三重门在函数内）。
     checkUpdate: checkUpdate, autoUpd: autoUpd, verCmp: verCmp,
-    upd: function () { return { state: UPD.state, cur: UPD.cur, tag: UPD.tag, url: UPD.url, notes: updNotes(), at: UPD.at }; },
+    // 结论落盘/取回：供 harness 断言「重开 App 仍显示上次结论」与三条作废门槛
+    updRestore: updRestore, updForget: function () { UPD = { state: 'idle', cur: '', tag: '', url: '', notes: '', at: 0 }; },
+    updStore: function () { try { return JSON.parse(localStorage.getItem(UPD_LAST) || 'null'); } catch (e) { return null; } },
+    upd: function () { return { state: UPD.state, cur: UPD.cur, tag: UPD.tag, url: UPD.url, notes: updNotes(), at: UPD.at, atText: updAtText() }; },
     saveCfg: saveCfg
   };
 
