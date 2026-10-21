@@ -3,12 +3,14 @@
 
   var LS_KEY = 'tokendesk.cfg.v1';
   var PRESETS = {
-    public: { newapiBase: '__PRESET_PUBLIC_NEWAPI__', hubBase: '__PRESET_PUBLIC_账号池__' },
-    lan:    { newapiBase: '__PRESET_LAN_NEWAPI__',    hubBase: '__PRESET_LAN_账号池__' }
+    public: { newapiBase: '__PRESET_PUBLIC_NEWAPI__', hubBase: '__PRESET_PUBLIC_HUB__' },
+    lan:    { newapiBase: '__PRESET_LAN_NEWAPI__',    hubBase: '__PRESET_LAN_HUB__' }
   };
 
+  // 构建期未注入的占位符不算“可用地址”：否则点按钮会把 __PRESET_*__ 字面量写进配置
+  function presetOk(v) { return !!v && String(v).indexOf('__PRESET_') < 0; }
   function presetReady(k) {
-    return !!(PRESETS[k] && PRESETS[k].newapiBase && PRESETS[k].newapiBase.indexOf('__PRESET_') < 0);
+    return !!(PRESETS[k] && presetOk(PRESETS[k].newapiBase));
   }
   var DEF = {
     newapiBase: '',
@@ -2129,8 +2131,8 @@
         if (!p) return;
         var gw0 = CFG.newapiBase;
         collect();
-        CFG.newapiBase = p.newapiBase;
-        CFG.hubBase = p.hubBase;
+        if (presetOk(p.newapiBase)) CFG.newapiBase = p.newapiBase;   // 占位符未注入：保留用户已填的值，绝不写占位符
+        if (presetOk(p.hubBase)) CFG.hubBase = p.hubBase;
         CFG.channel = 'auto';
         saveCfg();
         if (gw0 !== CFG.newapiBase) rawReset();   // 换了网关：日志仓整仓作废，不能让旧行冒充新网关
@@ -2753,8 +2755,8 @@
       var act = b.getAttribute('data-err');
       if (act === 'settings') { showTab('settings'); return; }
       if (act === 'lan') {
-        CFG.newapiBase = PRESETS.lan.newapiBase;
-        CFG.hubBase = PRESETS.lan.hubBase;
+        if (presetOk(PRESETS.lan.newapiBase)) CFG.newapiBase = PRESETS.lan.newapiBase;
+        if (presetOk(PRESETS.lan.hubBase)) CFG.hubBase = PRESETS.lan.hubBase;
         CFG.channel = 'auto';
         saveCfg();
         S.hubToken = '';
