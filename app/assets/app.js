@@ -19,7 +19,7 @@
     range: '24h',
     maxPages: '80',
     guideDone: false,
-    channel: 'browser',
+    channel: 'native',
     autoRefresh: '60',
     prefetch: '1',
     accRealm: 'all',
@@ -1937,7 +1937,7 @@
   }
 
   function channelLabel(ch) {
-    if (ch === 'browser') return '浏览器内核（全部请求）';
+    if (ch === 'browser') return '浏览器内核直连（全部请求）';
     if (ch === 'native') return '原生请求（全部请求）';
     return '自动（https→浏览器内核 / http→原生）';
   }
@@ -1964,7 +1964,7 @@
     }
 
     html += '<div class="card"><div class="card-h"><div class="card-t">连接方案</div>' +
-      '<span class="pill ' + (CFG.channel === 'native' ? 'warn' : 'ok') + '">' +
+      '<span class="pill ' + (CFG.channel === 'native' ? 'ok' : 'warn') + '">' +
       (CFG.channel === 'browser' ? '浏览器内核' : CFG.channel === 'native' ? '原生请求' : '自动') + '</span></div>' +
       '<div class="tok-acts" style="margin-top:2px">' +
       (presetReady('public') ? '<button class="btn ok" data-preset="public">公网地址</button>' : '') +
@@ -1978,12 +1978,14 @@
         '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">一键改成「自动」</button></div></div>' : '') +
       '<div id="f-adv-box" style="display:none;margin-top:12px">' +
       '<div class="field"><label>请求通道</label><select id="f-channel">' +
-      '<option value="browser" ' + (CFG.channel === 'browser' ? 'selected' : '') + '>浏览器内核（默认，最兼容）</option>' +
+      '<option value="native" ' + (CFG.channel === 'native' ? 'selected' : '') + '>原生请求（默认，仅内网 http）</option>' +
       '<option value="auto" ' + (CFG.channel === 'auto' ? 'selected' : '') + '>自动（https→浏览器内核 / http→原生）</option>' +
-      '<option value="native" ' + (CFG.channel === 'native' ? 'selected' : '') + '>原生请求（仅内网 http，公网域名必失败）</option>' +
+      '<option value="browser" ' + (CFG.channel === 'browser' ? 'selected' : '') + '>浏览器内核直连（会绕过部分防护）</option>' +
       '</select></div>' +
-      '<div class="note">默认「浏览器内核」最稳：公网域名走浏览器栈不易被网关拦，原生请求常被断连。' +
-      '只有确定只用内网 http 时，才考虑切「原生」。</div></div>' +
+      '<div class="note">默认「原生请求」走 App 内置 HTTP 客户端，不经过页面同源限制。' +
+      '地址是公网 https 域名、原生被网关断连时，才切「自动」或「浏览器内核直连」。</div>' +
+      '<div class="note" style="color:#fcd34d">「浏览器内核直连」由页面自己发请求，不经过原生 HTTP 层，' +
+      '会绕过部分防护（原生侧地址/来源校验），仅在内网可信环境使用。</div></div>' +
       '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">NewAPI 网关</div></div>' +
@@ -2671,8 +2673,10 @@
 
   function boot() {
     purgeLegacyCache();
-    if (!CFG.channel) CFG.channel = 'browser';
-    if (isConflicted()) CFG.channel = 'browser';
+    if (!CFG.channel) CFG.channel = 'native';
+    // 冲突 = https 地址 + 原生通道：回落「自动」（https→浏览器内核 / http→原生），
+    // 比直接压成「浏览器内核」更好——用户换回内网地址时自动恢复原生，不必再手动改。
+    if (isConflicted()) CFG.channel = 'auto';
 
     if (looksUrl(CFG.newapiToken)) {
       var misplaced = CFG.newapiToken;
