@@ -34,7 +34,6 @@
     hubPass: '',
     range: '24h',
     maxPages: '80',
-    guideDone: false,
     channel: 'native',
     autoRefresh: '60',
     prefetch: '1',
@@ -2197,18 +2196,7 @@
     var html = '';
     if (CFG.tokenCleared) {
       html += '<div class="errbox" style="border-color:rgba(251,191,36,.45);background:rgba(251,191,36,.08);color:#fde68a">' +
-        '<b>上次「管理令牌」里填的是网址</b>已自动搬到上面的「地址」栏，令牌已清空。' +
-        '请重新粘贴 32 位管理令牌（个人设置 → 安全设置 → 系统访问令牌）。</div>';
-    }
-    if (!CFG.newapiToken && !CFG.guideDone) {
-      html += '<div class="card" style="border-color:rgba(74,222,128,.35);background:linear-gradient(180deg,rgba(74,222,128,.10),rgba(19,26,35,1) 60%)">' +
-        '<div class="card-h"><div class="card-t" style="color:#bbf7d0">首次使用 · 三步搞定</div></div>' +
-        '<div class="note" style="color:#d1fae5;line-height:1.9">' +
-        '1）填网关地址' + (presetReady('lan') || presetReady('public') ? '（已预填，可用上方按钮切换公网/内网）' : '（如 http://你的网关地址:3000）') + '<br>' +
-        '2）填 <b>NewAPI 管理令牌</b>（必填；New-API → 个人设置 → 安全设置 → 系统访问令牌）<br>' +
-        '3）填 <b>账号池面板密码</b>（可选，在下方「账号池面板」卡片；不填就只看 NewAPI）<br>' +
-        '然后点「保存并连接」。连不上就看下面「最近请求日志」里的状态码，报错时把「复制诊断信息」的内容发出来。</div>' +
-        '<div class="tok-acts"><button class="btn ghost" id="f-guide-done">知道了，不再显示</button></div></div>';
+        '<b>令牌栏里填的是网址</b>，已搬到地址栏。请重填 32 位管理令牌。</div>';
     }
 
     html += '<div class="card"><div class="card-h"><div class="card-t">连接方案</div>' +
@@ -2220,47 +2208,36 @@
       '<button class="btn ghost" id="f-adv">高级</button></div>' +
       '<div class="note" style="margin-top:10px">当前：NewAPI <b>' + baseKind(CFG.newapiBase) + '</b> · 账号池 <b>' + baseKind(CFG.hubBase) + '</b>' +
       (baseKind(CFG.newapiBase) !== baseKind(CFG.hubBase)
-        ? ' <span style="color:#fcd34d">（两套地址不一致，确认是不是漏改了一个）</span>' : '') + '</div>' +
-      (isConflicted() ? '<div class="errbox" style="margin:10px 0 0"><b>通道冲突</b>' +
+        ? ' <span style="color:#fcd34d">（地址不一致）</span>' : '') + '</div>' +
+      (isConflicted() ? '<div class="errbox" style="margin:10px 0 0"><b>通道冲突</b> ' +
+        '公网 https + 原生请求易被网关断连。' +
+        (inShell() ? '改用内网地址。' : '') +
         (inShell()
-          ? '当前地址是公网域名（https），通道却是「原生请求」——这个组合常被网关断连（表现为 401 / 连接被重置）。' +
-            '本版本壳内已关闭跨源访问，「浏览器内核直连」只对显式返回 Access-Control-Allow-Origin 的服务端有效，' +
-            (presetReady('lan') ? '改用内网地址最稳（同一网络内不走浏览器内核）。'
-              : '请改用内网地址，或在网关侧开启 CORS。') +
-            (presetReady('lan') ? '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">改用内网地址</button></div>' : '')
-          : '当前地址是公网域名（https），但通道选了「原生请求」——这个组合常被网关断连（表现为 401 / 连接被重置）。' +
-            '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">一键改成「自动」</button></div>') +
+          ? (presetReady('lan') ? '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">改用内网地址</button></div>' : '')
+          : '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">一键改成「自动」</button></div>') +
         '</div>' : '') +
       '<div id="f-adv-box" style="display:none;margin-top:12px">' +
       '<div class="field"><label>请求通道</label><select id="f-channel">' +
       '<option value="native" ' + (CFG.channel === 'native' ? 'selected' : '') + '>原生请求（默认，仅内网 http）</option>' +
       '<option value="auto" ' + (CFG.channel === 'auto' ? 'selected' : '') + '>自动（https→浏览器内核 / http→原生）</option>' +
-      '<option value="browser" ' + (CFG.channel === 'browser' ? 'selected' : '') + '>浏览器内核直连（会绕过部分防护）</option>' +
+      '<option value="browser" ' + (CFG.channel === 'browser' ? 'selected' : '') + '>浏览器内核直连</option>' +
       '</select></div>' +
-      '<div class="note">默认「原生请求」走 App 内置 HTTP 客户端，不经过页面同源限制。' +
-      '地址是公网 https 域名、原生被网关断连时，才切「自动」或「浏览器内核直连」。</div>' +
-      '<div class="note" style="color:#fcd34d">「浏览器内核直连」由页面自己发请求，不经过原生 HTTP 层，' +
-      '会绕过部分防护（原生侧地址/来源校验）。本版本已放开 file:// 跨源（与 v1.0.72 一致），' +
-      '任意网关都可用；安全上只装自己可信的包，别在页面里粘贴来路不明的地址。</div>' +
       '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">NewAPI 网关</div></div>' +
-      '<div class="field"><label>① 地址 <span style="color:#fca5a5">（必填，网关网址不是密钥）</span></label><input id="f-nabase" type="url" value="' + esc(CFG.newapiBase) + '" placeholder="http://你的网关地址:3000"></div>' +
-      '<div class="field"><label>② 管理令牌 <span style="color:#fca5a5">（必填，32 位字母数字，不是网址）</span>' +
+      '<div class="field"><label>① 地址 <span style="color:#fca5a5">必填</span></label><input id="f-nabase" type="url" value="' + esc(CFG.newapiBase) + '" placeholder="http://网关地址:3000"></div>' +
+      '<div class="field"><label>② 管理令牌 <span style="color:#fca5a5">必填</span>' +
       ' <a href="#" id="f-tokhelp" style="margin-left:6px">怎么拿？</a></label>' +
-      '<input id="f-natok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(CFG.newapiToken) + '" placeholder="个人设置 → 安全设置 → 系统访问令牌"></div>' +
-      '<div class="field"><label>③ 用户 ID（数字）</label><input id="f-nauid" type="number" inputmode="numeric" value="' + esc(CFG.newapiUid) + '">' +
-      '<div class="hint">New-API 里 Root 用户通常是 1。</div></div>' +
+      '<input id="f-natok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(CFG.newapiToken) + '" placeholder="32 位字母数字"></div>' +
+      '<div class="field"><label>③ 用户 ID</label><input id="f-nauid" type="number" inputmode="numeric" value="' + esc(CFG.newapiUid) + '" placeholder="1"></div>' +
       '<div class="tok-acts"><button class="btn" id="f-natest">测试连接</button>' +
       '<button class="btn ok" id="f-save">保存并连接</button></div>' +
       (SECURE_ERR ? '<div class="note" style="color:#fca5a5;margin-top:8px">⚠ ' + esc(SECURE_ERR) + '</div>' : '') +
-      (secureAvailable() && !SECURE_ERR ? '<div class="note" style="margin-top:8px;color:var(--dim-2)">地址与令牌已存入系统安全存储（Android Keystore），本机明文配置里不再有令牌。</div>' : '') +
       '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">账号池面板</div></div>' +
-      '<div class="field"><label>地址</label><input id="f-hub" type="url" value="' + esc(CFG.hubBase) + '" placeholder="https://你的-hub-地址"></div>' +
-      '<div class="field"><label>面板密码 <span style="color:var(--dim-2)">（可选，不填则跳过 账号池面板）</span></label><input id="f-hubpass" type="password" value="' + esc(CFG.hubPass) + '">' +
-      '<div class="hint">用于换取面板 token（X-Panel-Token），不落任何服务器。</div></div>' +
+      '<div class="field"><label>地址</label><input id="f-hub" type="url" value="' + esc(CFG.hubBase) + '" placeholder="https://hub 地址"></div>' +
+      '<div class="field"><label>面板密码 <span style="color:var(--dim-2)">可选</span></label><input id="f-hubpass" type="password" value="' + esc(CFG.hubPass) + '"></div>' +
       '<div class="tok-acts"><button class="btn" id="f-hubtest">测试登录</button>' +
       '<button class="btn ok" id="f-save2">保存并连接</button></div></div>';
 
@@ -2269,18 +2246,15 @@
       ['today', '24h', '7d'].map(function (r) {
         return '<option value="' + r + '" ' + (CFG.range === r ? 'selected' : '') + '>' + RANGE_NAME[r] + '</option>';
       }).join('') + '</select></div>' +
-      '<div class="field"><label>最大翻页数（每页 100 条日志）</label><input id="f-maxpages" type="number" inputmode="numeric" value="' + esc(CFG.maxPages) + '">' +
-      '<div class="hint">24 小时一般 20–40 页；7 天可能上百页，翻页越多越慢。</div></div>' +
+      '<div class="field"><label>最大翻页数</label><input id="f-maxpages" type="number" inputmode="numeric" value="' + esc(CFG.maxPages) + '"></div>' +
       '<div class="field"><label>自动刷新</label><select id="f-auto">' +
       [['0', '关闭'], ['30', '每 30 秒'], ['60', '每 1 分钟'], ['300', '每 5 分钟']].map(function (o) {
         return '<option value="' + o[0] + '" ' + (String(CFG.autoRefresh) === o[0] ? 'selected' : '') + '>' + o[1] + '</option>';
-      }).join('') + '</select>' +
-      '<div class="hint">只刷新已过期的数据（缓存优先），锁屏/切到后台自动暂停。</div></div>' +
-      '<div class="field"><label>后台预取 7 天数据</label><select id="f-prefetch">' +
-      [['1', '开启（切 7 天不用等）'], ['0', '关闭']].map(function (o) {
+      }).join('') + '</select></div>' +
+      '<div class="field"><label>后台预取 7 天</label><select id="f-prefetch">' +
+      [['1', '开启'], ['0', '关闭']].map(function (o) {
         return '<option value="' + o[0] + '" ' + (String(CFG.prefetch) !== '0' && o[0] === '1' || String(CFG.prefetch) === '0' && o[0] === '0' ? 'selected' : '') + '>' + o[1] + '</option>';
-      }).join('') + '</select>' +
-      '<div class="hint">空闲时把 7 天日志一次补齐并存在本机，之后切范围全部本地重算、零请求。</div></div>' +
+      }).join('') + '</select></div>' +
       '</div>';
 
     html += '<div class="card"><div class="card-h"><div class="card-t">关于</div><span class="pill mute">v' + esc(info.version) + '</span></div>' +
@@ -2298,8 +2272,6 @@
       '<button class="btn ghost" id="f-updcopy" style="height:38px;display:none">复制下载地址</button></div>' +
       '<div class="note" id="upd-note" style="display:none"></div>' +
       '<div class="hr"></div>' +
-      '<div class="note">凭证只存在本机 WebView 的 localStorage 里（未加密）。手机丢失或转手前请在「清除配置」里清空。' +
-      '本应用不采集、不上传任何数据，所有请求只发往你填写的地址（公网域名或内网 IP）。</div>' +
       '<div class="tok-acts"><button class="btn danger" id="f-clear">清除配置</button>' +
       '<button class="btn ghost" id="f-exit">退出应用</button></div></div>';
 
@@ -2370,14 +2342,6 @@
         toast('已改成「自动」，再点保存并连接', 'ok');
       };
     }
-
-    var guideDone = $('#f-guide-done');
-    if (guideDone) guideDone.onclick = function () {
-      CFG.guideDone = true;
-      saveCfg();
-      renderSettings();
-      toast('已收起', 'ok');
-    };
 
     var advBtn = $('#f-adv');
     if (advBtn) advBtn.onclick = function () {

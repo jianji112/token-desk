@@ -1006,7 +1006,7 @@ const fixtures = [
     check(out) {
       return [
         eq('壳内 boot 不得把 https+原生 回落成「自动」', out.ch0, 'native'),
-        eq('冲突卡必须说清壳内已关跨源（不能一句「改成自动」了事）', out.txt.indexOf('本版本壳内已关闭跨源访问') >= 0, true),
+        eq('壳内冲突卡必须给出「改用内网地址」的结论（不能一句「改成自动」了事）', out.txt.indexOf('改用内网地址') >= 0, true),
         eq('壳内冲突卡不得出现「一键改成「自动」」', out.txt.indexOf('一键改成「自动」') >= 0, false),
         eq('壳内按钮文案必须是「改用内网地址」', out.btnText, '改用内网地址'),
         eq('点按钮后通道仍是 native（绝不写 auto）', out.ch1, 'native'),
