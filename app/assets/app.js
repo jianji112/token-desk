@@ -1957,6 +1957,10 @@
     return /^https:/i.test(u) ? '公网域名' : '内网';
   }
 
+  // 是否在 App 壳内跑（有原生桥 → 页面是 file://，跨源被关）。
+  // 壳内浏览器内核直连只对显式返回 CORS 头的服务端可用，所以壳内绝不把 https 用户往 auto 引。
+  function inShell() { return !!window.NativeBridge; }
+
   function isConflicted() {
     return /^https:/i.test(CFG.newapiBase || '') && CFG.channel === 'native';
   }
@@ -1999,8 +2003,15 @@
       (baseKind(CFG.newapiBase) !== baseKind(CFG.hubBase)
         ? ' <span style="color:#fcd34d">（两套地址不一致，确认是不是漏改了一个）</span>' : '') + '</div>' +
       (isConflicted() ? '<div class="errbox" style="margin:10px 0 0"><b>通道冲突</b>' +
-        '当前地址是公网域名（https），但通道选了「原生请求」——这个组合常被网关断连（表现为 401 / 连接被重置）。' +
-        '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">一键改成「自动」</button></div></div>' : '') +
+        (inShell()
+          ? '当前地址是公网域名（https），通道却是「原生请求」——这个组合常被网关断连（表现为 401 / 连接被重置）。' +
+            '本版本壳内已关闭跨源访问，「浏览器内核直连」只对显式返回 Access-Control-Allow-Origin 的服务端有效，' +
+            (presetReady('lan') ? '改用内网地址最稳（同一网络内不走浏览器内核）。'
+              : '请改用内网地址，或在网关侧开启 CORS。') +
+            (presetReady('lan') ? '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">改用内网地址</button></div>' : '')
+          : '当前地址是公网域名（https），但通道选了「原生请求」——这个组合常被网关断连（表现为 401 / 连接被重置）。' +
+            '<div class="tok-acts"><button class="btn ok" id="f-fixconf" style="height:38px">一键改成「自动」</button></div>') +
+        '</div>' : '') +
       '<div id="f-adv-box" style="display:none;margin-top:12px">' +
       '<div class="field"><label>请求通道</label><select id="f-channel">' +
       '<option value="native" ' + (CFG.channel === 'native' ? 'selected' : '') + '>原生请求（默认，仅内网 http）</option>' +
@@ -2110,6 +2121,22 @@
     if (isConflicted()) {
       var fixBtn = $('#f-fixconf');
       if (fixBtn) fixBtn.onclick = function () {
+        if (inShell()) {
+          // 壳内只推内网预设，绝不写 channel='auto'（https→自动 会落到跨源受限的浏览器内核，必失败）
+          var gw0 = CFG.newapiBase;
+          collect();
+          if (presetOk(PRESETS.lan.newapiBase)) CFG.newapiBase = PRESETS.lan.newapiBase;
+          if (presetOk(PRESETS.lan.hubBase)) CFG.hubBase = PRESETS.lan.hubBase;
+          CFG.channel = 'native';
+          saveCfg();
+          // 换了网关才清 hubToken（面板令牌绑定在网关上）；没换成内网预设时网络一行没变，
+          // 清掉只会让人白白重输一次面板密码。
+          if (gw0 !== CFG.newapiBase) { rawReset(); S.hubToken = ''; }   // 换网关：日志仓整仓作废，不能让旧行冒充新网关
+          renderSettings();
+          toast('已改用内网地址（原生请求）', 'ok');
+          refreshAll();
+          return;
+        }
         CFG.channel = 'auto';
         saveCfg();
         renderSettings();
@@ -2179,7 +2206,10 @@
         toast('「管理令牌」里像是地址，请检查是否粘错框（地址框在它上面）', 'err');
         return;
       }
-      if (isConflicted()) {
+      // 壳内没有可用的「自动」通道（https→浏览器内核 受跨源限制必失败），拦着不让保存只会把人锁死：
+      // 网页版保持原确认流程；壳内直接放行，只在保存提示里点明「被断连就改内网地址」。
+      var conflictHint = '';
+      if (isConflicted() && !inShell()) {
         confirmSheet('通道冲突，先改一下',
           '地址是公网域名（https），通道却是「原生请求」。这个组合常被网关断连（看起来像令牌失效）。改成「自动」吗？',
           function () {
@@ -2190,13 +2220,14 @@
           });
         return;
       }
+      if (isConflicted()) conflictHint = '（公网 https 走原生请求；若被网关断连，请改用内网地址）';
       if (!CFG.newapiToken && !CFG.hubPass) { toast('至少填一项凭证才能连接', 'err'); return; }
       CFG.tokenCleared = false;
       if (CFG.swappedAt && Date.now() - CFG.swappedAt < 3000) {
         toast('检测到「地址」和「令牌」填反了，已自动对调', 'ok');
         CFG.swappedAt = 0;
       } else {
-        toast('已保存，正在连接…', 'ok');
+        toast('已保存，正在连接…' + conflictHint, 'ok');
       }
       S.hubToken = '';
       cacheClearAll();
@@ -2700,9 +2731,11 @@
   function boot() {
     purgeLegacyCache();
     if (!CFG.channel) CFG.channel = 'native';
-    // 冲突 = https 地址 + 原生通道：回落「自动」（https→浏览器内核 / http→原生），
+    // 冲突 = https 地址 + 原生通道：网页版回落「自动」（https→浏览器内核 / http→原生），
     // 比直接压成「浏览器内核」更好——用户换回内网地址时自动恢复原生，不必再手动改。
-    if (isConflicted()) CFG.channel = 'auto';
+    // 壳内例外：壳内「自动」的 https 分支必落到跨源受限的浏览器内核（必失败），保持原生，
+    // 由设置页的冲突卡如实提示「改用内网地址 / 服务端开 CORS」。
+    if (isConflicted() && !inShell()) CFG.channel = 'auto';
 
     if (looksUrl(CFG.newapiToken)) {
       var misplaced = CFG.newapiToken;
@@ -2838,6 +2871,10 @@
     rawFirstBase: function () { return rawFirstBase; },
     // 凭证通道状态（只读）+ 落盘入口，供 harness 断言「无桥时 4 键必须回退明文」
     secureState: function () { return { available: secureAvailable(), dead: secureDead, err: SECURE_ERR, keys: SECURE_KEYS.slice() }; },
+    // 构建期预设对象（引用，harness 可改）：正式包由 build.sh 注入真地址，
+    // 源码里是 __PRESET_*__ 占位 → presetReady() 恒假，「改用内网地址」这类分支在测试里
+    // 永远渲染不出来。给个可写引用，才能把「预设就绪」这条路径钉进回归。
+    presets: function () { return PRESETS; },
     saveCfg: saveCfg
   };
 

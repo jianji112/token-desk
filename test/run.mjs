@@ -979,6 +979,95 @@ const fixtures = [
   },
 
   {
+    id: 'F19',
+    name: '壳内 https + 原生：boot 不得回落「自动」，冲突卡只推内网地址',
+    // 壳内是 file:// 页面，本版本已关掉万能跨源：https 用户一旦回落 auto 就落到
+    // 「浏览器内核直连」，对内网/未开 CORS 的网关必失败（表现为全红）。所以壳内保持原生，
+    // 由冲突卡如实告知「改用内网地址 / 服务端开 CORS」，而不是把人推去一个必死通道。
+    cfg: (port) => baseCfg(port, { newapiBase: 'https://gw.example.com', channel: 'native' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var ch0 = __app.cfg().channel;
+      // 源码里的预设是 __PRESET_*__ 占位（正式包由 build.sh 注入），测试手工注入才进得去按钮分支
+      var lan = 'http://127.0.0.1:' + location.port + '/lan';
+      __app.presets().lan.newapiBase = lan;
+      __app.presets().lan.hubBase = '';
+      __app.state.hubToken = 'keep-me';
+      __app.showTab('settings');
+      var el = document.querySelector('[data-view="settings"]');
+      var txt = el ? el.textContent : '';
+      var btn = document.getElementById('f-fixconf');
+      var btnText = btn ? btn.textContent : null;
+      if (btn) btn.click();
+      return { ch0: ch0, txt: txt, btnText: btnText, lan: lan,
+               ch1: __app.cfg().channel, base1: __app.cfg().newapiBase, hubTok: __app.state.hubToken };
+    })()`,
+    check(out) {
+      return [
+        eq('壳内 boot 不得把 https+原生 回落成「自动」', out.ch0, 'native'),
+        eq('冲突卡必须说清壳内已关跨源（不能一句「改成自动」了事）', out.txt.indexOf('本版本壳内已关闭跨源访问') >= 0, true),
+        eq('壳内冲突卡不得出现「一键改成「自动」」', out.txt.indexOf('一键改成「自动」') >= 0, false),
+        eq('壳内按钮文案必须是「改用内网地址」', out.btnText, '改用内网地址'),
+        eq('点按钮后通道仍是 native（绝不写 auto）', out.ch1, 'native'),
+        eq('点按钮后地址换成内网预设', out.base1, out.lan),
+        eq('换了网关 → hubToken 必须清掉（面板令牌绑定网关）', out.hubTok, ''),
+      ];
+    },
+  },
+
+  {
+    id: 'F19b',
+    name: '网页版（无桥）https + 原生：仍回落「自动」，壳内例外不得外溢',
+    cfg: (port) => baseCfg(port, { newapiBase: 'https://gw.example.com', channel: 'native' }),
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var ls = {};
+      try { ls = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      __app.showTab('settings');
+      return { bridge: !!window.NativeBridge, ch: __app.cfg().channel, lsCh: ls.channel || null,
+               fix: !!document.getElementById('f-fixconf') };
+    })()`,
+    check(out) {
+      return [
+        eq('测试前提：网页版没有 NativeBridge', out.bridge, false),
+        eq('网页版保持原行为：boot 把 https+原生 回落成「自动」', out.ch, 'auto'),
+        eq('回落值必须落盘（不能只改内存）', out.lsCh, 'auto'),
+        eq('通道已是 auto → 不该再显示冲突卡', out.fix, false),
+      ];
+    },
+  },
+
+  {
+    id: 'F19c',
+    name: '壳内冲突卡：没换成内网预设时不得清面板令牌',
+    // 上一版把 S.hubToken='' 写在 if (gw0 !== newapiBase) 外面：预设恰好等于当前地址时
+    // 网关一行没变，却把面板令牌清掉，用户白白重输一次密码。令牌绑定在网关上，只有换网关才该清。
+    cfg: (port) => baseCfg(port, { newapiBase: 'https://lan.example.com', channel: 'native' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.presets().lan.newapiBase = 'https://lan.example.com';   // 与当前地址相同 → 点了等于没换网关
+      __app.presets().lan.hubBase = '';
+      __app.showTab('settings');
+      var btn = document.getElementById('f-fixconf');
+      var hasBtn = !!btn;
+      __app.state.hubToken = 'keep-me';
+      if (btn) btn.click();
+      return { hasBtn: hasBtn, hubTok: __app.state.hubToken,
+               ch: __app.cfg().channel, base: __app.cfg().newapiBase };
+    })()`,
+    check(out) {
+      return [
+        eq('测试前提：预设就绪时冲突卡必须有按钮', out.hasBtn, true),
+        eq('网关没变 → hubToken 必须保留（上一版的 bug）', out.hubTok, 'keep-me'),
+        eq('通道仍是 native', out.ch, 'native'),
+        eq('地址不变', out.base, 'https://lan.example.com'),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
