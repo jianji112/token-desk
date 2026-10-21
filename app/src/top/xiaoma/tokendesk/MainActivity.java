@@ -97,8 +97,11 @@ public class MainActivity extends Activity {
         s.setAllowFileAccess(true);
         // content:// 通道对本应用无用，关掉以减少入口
         s.setAllowContentAccess(false);
-        s.setAllowFileAccessFromFileURLs(true);
-        s.setAllowUniversalAccessFromFileURLs(true);
+        // file:// 资产页不得跨源读取本地/远端内容：这两个开关是 WebView 的万能后门
+        // （file:// 页面可 XHR 任意 origin、可读同目录任意文件），本应用一律走 NativeBridge，
+        // 不需要它们。关闭后浏览器内核直连通道若受影响，见 2026-10-21 实测记录。
+        s.setAllowFileAccessFromFileURLs(false);
+        s.setAllowUniversalAccessFromFileURLs(false);
         s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setSupportMultipleWindows(false);
         s.setUseWideViewPort(true);
@@ -108,7 +111,8 @@ public class MainActivity extends Activity {
         s.setSupportZoom(false);
         s.setTextZoom(100);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        // 混合内容一律不放行：资产页是 file:// 本地页面，正常不加载任何 http 子资源
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         String ua = s.getUserAgentString();
         if (ua != null) {
             ua = ua.replace("; wv)", ")").replace(" wv ", " ");
