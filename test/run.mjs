@@ -1211,6 +1211,245 @@ const fixtures = [
   },
 
   {
+    id: 'F23a',
+    name: '版本比较：点分段逐段数字比（1.0.9 < 1.0.10，不许按字符串比）',
+    // 版本号一旦按字符串比，1.0.9 会被判成大于 1.0.10，用户永远收不到 1.0.10 的提示 ——
+    // 这种错静默、无人报障，只能用纯函数边界钉死。本用例不许产生任何网络请求。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = { appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); } };
+      // 只拦「更新检查」的端点（含真端点 api.github.com，好让漏传 urls 的用例被抓到），
+      // 其余请求原样交给真 fetch —— 否则 app 自己的启动加载也被这场 mock 顶掉。
+      (function () {
+        var real = window.fetch;
+        window.__UPDCALLS = [];
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__UPDCALLS.push(s);
+          return Promise.reject(new Error('F23a 不该发请求'));
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var C = __app.verCmp;
+      return {
+        a: C('1.0.9', '1.0.10'), b: C('1.0.72', '1.0.73'), c: C('1.0.72', '1.0.72'),
+        d: C('1.0.73', '1.0.72'), e: C('1.0', '1.0.0'), f: C('2', '1.9.9'),
+        g: C('', '1.0.73'), h: C('v1.0.72', 'v1.0.73'), i: C(null, null),
+        fetches: window.__UPDCALLS.length
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('1.0.9 必须小于 1.0.10（字符串比会判反）', out.a, -1),
+        eq('1.0.72 < 1.0.73', out.b, -1),
+        eq('同版本必须相等', out.c, 0),
+        eq('远端更老 → 本地更新（+1）', out.d, 1),
+        eq('1.0 与 1.0.0 视为相等（短的一侧补零）', out.e, 0),
+        eq('段数不同也不许错：2 > 1.9.9', out.f, 1),
+        eq('一侧取不到数字 → 0（不可比宁可不提示）', out.g, 0),
+        eq('带 v 前缀照常比', out.h, -1),
+        eq('两侧都空 → 0', out.i, 0),
+        eq('纯比较函数不得发出任何网络请求', out.fetches, 0),
+      ];
+    },
+  },
+
+  {
+    id: 'F23b',
+    name: '更新检查三态 DOM：发现新版本 / 已是最新 / 网络失败静默（不弹错、不进 errbox）',
+    // 「只提示不下载」的对外承诺全靠这一条：有新版只多一行字 + 复制地址；
+    // 已是最新就明说；失败一律静默回「未检查」，绝不用 errbox 或 err toast 吓人。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = {
+        appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); },
+        copy: function (t) { window.__COPIED = t; }
+      };
+      // 只拦更新检查端点，其余请求放给真 fetch（app 自己的启动加载不受影响）
+      (function () {
+        var real = window.fetch;
+        window.__UPDCALLS = [];
+        window.__MODE = 'new';
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__UPDCALLS.push(s);
+          if (window.__MODE === 'fail') return Promise.reject(new Error('net down'));
+          var tag = window.__MODE === 'new' ? 'v1.0.73' : 'v1.0.72';
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({
+              tag_name: tag,
+              html_url: 'https://github.com/jianji112/token-desk/releases/tag/' + tag,
+              body: '修复签到判定\\n其余细节见提交记录'
+            });
+          } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.showTab('settings');
+      var URLS = ['https://example.invalid/releases/latest'];
+      // 设置页本来就可能有一条无关的 errbox（例如无 Keystore 的提示），
+      // 所以断言的是「更新检查不许再添一条」，而不是「整页零 errbox」。
+      var errbox0 = document.querySelectorAll('.errbox').length;
+      var toast0 = document.getElementById('toast') ? document.getElementById('toast').className : '';
+      function snap() {
+        var line = document.getElementById('upd-line');
+        var cp = document.getElementById('f-updcopy');
+        var note = document.getElementById('upd-note');
+        var btn = document.getElementById('f-updcheck');
+        var toastEl = document.getElementById('toast');
+        return {
+          line: line ? line.textContent : null,
+          cpShown: cp ? cp.style.display !== 'none' : null,
+          note: (note && note.style.display !== 'none') ? note.textContent : '',
+          btn: btn ? btn.textContent : null,
+          btnDisabled: btn ? !!btn.disabled : null,
+          errbox: document.querySelectorAll('.errbox').length,
+          toastClass: toastEl ? toastEl.className : null
+        };
+      }
+      window.__MODE = 'new';
+      var u1 = await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });
+      var st1 = u1.state, tag1 = u1.tag, url1 = u1.url;
+      var s1 = snap();
+      // 复制按钮走的是 NativeBridge.copy：必须把地址交给剪贴板，不许打开浏览器
+      var cpBtn = document.getElementById('f-updcopy');
+      if (cpBtn) cpBtn.onclick();
+      var copied = window.__COPIED || '';
+      window.__MODE = 'latest';
+      var u2 = await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });
+      var st2 = u2.state;
+      var s2 = snap();
+      window.__MODE = 'fail';
+      var u3 = await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });
+      var st3 = u3.state;
+      var s3 = snap();
+      return { errbox0: errbox0, toast0: toast0,
+               st1: st1, tag1: tag1, url1: url1, s1: s1, copied: copied,
+               st2: st2, s2: s2, st3: st3, s3: s3, fetches: window.__UPDCALLS.length };
+    })()`,
+    check(out) {
+      return [
+        eq('前提：设置页原本没有 errbox（有的话下面「不添一条」的断言就失效）', out.errbox0, 0),
+        eq('远端 v1.0.73 → 状态 new', out.st1, 'new'),
+        eq('新版 tag 只留数字段（去掉 v 前缀）', out.tag1, '1.0.73'),
+        eq('状态里的下载地址是 Release 页面', out.url1, 'https://github.com/jianji112/token-desk/releases/tag/v1.0.73'),
+        eq('设置页显示「发现新版本 v1.0.73（当前 1.0.72）」', out.s1.line, '发现新版本 v1.0.73（当前 1.0.72）'),
+        eq('有新版才露出「复制下载地址」', out.s1.cpShown, true),
+        eq('更新说明只取首行、不整段灌进设置页', out.s1.note, '修复签到判定'),
+        eq('复制按钮交出的是 Release 页面地址', out.copied, 'https://github.com/jianji112/token-desk/releases/tag/v1.0.73'),
+        eq('有新版不得有 errbox（只提示不报错）', out.s1.errbox, out.errbox0),
+        eq('有新版不得出现 err toast', out.s1.toastClass === 'err', false),
+        eq('远端 v1.0.72 → 状态 latest', out.st2, 'latest'),
+        eq('已是最新时明说当前版本', out.s2.line, '已是最新（v1.0.72）'),
+        eq('已是最新时复制按钮收起', out.s2.cpShown, false),
+        eq('已是最新时没有说明行', out.s2.note, ''),
+        eq('网络失败 → 状态 fail（内部状态，不外显成红字）', out.st3, 'fail'),
+        eq('失败回到「未检查」，不显示上一次的结论', out.s3.line, '未检查'),
+        eq('失败时按钮恢复可点、文案回到「检查更新」', out.s3.btn, '检查更新'),
+        eq('失败时按钮不得停留在禁用态', out.s3.btnDisabled, false),
+        eq('网络失败不得弹 errbox', out.s3.errbox, out.errbox0),
+        eq('网络失败不得弹 err toast（静默）', out.s3.toastClass === 'err', false),
+        eq('三次检查 = 三次请求，别无多发', out.fetches, 3),
+      ];
+    },
+  },
+
+  {
+    id: 'F23c',
+    name: '同日已查过：自动检查不再发请求（force 手动查仍可绕过）',
+    // 预置「今天已查」标记 = 模拟同一天第二次冷启动。GitHub 未认证配额 60 次/小时/IP，
+    // 一旦每次冷启都打一次，用户连开几次就把自己 IP 打到 403，之后永远查不到更新。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = { appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); } };
+      (function () {
+        var real = window.fetch;
+        window.__UPDCALLS = [];
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__UPDCALLS.push(s);
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({ tag_name: 'v1.0.72', html_url: 'https://example.invalid/r', body: '' });
+          } });
+        };
+        function p2(n) { return n < 10 ? '0' + n : '' + n; }
+        var d = new Date(Date.now());   // 冻结时钟
+        localStorage.setItem('tokendesk.updchecked.v1', d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()));
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var URLS = ['https://example.invalid/releases/latest'];
+      var u1 = await __app.checkUpdate({ cur: '1.0.72', urls: URLS });   // 未 force：同日已查 → 直接返回
+      var st1 = u1.state, n1 = window.__UPDCALLS.length;
+      var u2 = await __app.checkUpdate({ force: true, cur: '1.0.72', urls: URLS });  // 手动查绕过标记
+      var st2 = u2.state, n2 = window.__UPDCALLS.length;
+      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });            // 再自动查一次：仍不请求
+      var n3 = window.__UPDCALLS.length;
+      return { st1: st1, n1: n1, st2: st2, n2: n2, n3: n3 };
+    })()`,
+    check(out) {
+      return [
+        eq('同日已查过 → 自动查不请求', out.n1, 0),
+        eq('没查就没结论，状态保持 idle', out.st1, 'idle'),
+        eq('手动查（force）必须绕过标记、真的发一次', out.n2, 1),
+        eq('force 那次结果仍按真实数据判定（v1.0.72 即最新）', out.st2, 'latest'),
+        eq('之后的自动查继续不请求', out.n3, 1),
+      ];
+    },
+  },
+
+  {
+    id: 'F23d',
+    name: '首次自动查后写「今天」标记；同日第二次不重复；http 页面 autoUpd 不发请求',
+    // 两件事：(1) 标记必须真的写下来（否则跨冷启动的节流是假的）；
+    // (2) autoUpd 的协议门 —— harness/桌面调试页是 http，桩了 NativeBridge 也不许真连 GitHub，
+    // 否则每条用例的冷启动都会打一次外网，测试就不再是离线的。
+    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    preSeed: `window.NativeBridge = { appInfo: function () { return JSON.stringify({ version: '1.0.72', sdk: 34, model: 'test' }); } };
+      (function () {
+        var real = window.fetch;
+        window.__UPDCALLS = [];
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
+          window.__UPDCALLS.push(s);
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({ tag_name: 'v1.0.73', html_url: 'https://example.invalid/r', body: 'x' });
+          } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var URLS = ['https://example.invalid/releases/latest'];
+      var n0 = window.__UPDCALLS.length;
+      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 今天第一次：查
+      var n1 = window.__UPDCALLS.length;
+      var mark = localStorage.getItem('tokendesk.updchecked.v1');
+      await __app.checkUpdate({ cur: '1.0.72', urls: URLS });        // 同日第二次：不查
+      var n2 = window.__UPDCALLS.length;
+      await __app.autoUpd();                                          // 启动那次：http 页面 → 协议门
+      var n3 = window.__UPDCALLS.length;
+      var d = new Date(Date.now());
+      function p2(n) { return n < 10 ? '0' + n : '' + n; }
+      var today = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+      return { n0: n0, n1: n1, n2: n2, n3: n3, mark: mark, today: today,
+               proto: location.protocol };
+    })()`,
+    check(out) {
+      return [
+        eq('起手不该有请求（老用例遗留的请求会被这里抓到）', out.n0, 0),
+        eq('今天第一次查 → 恰好一次请求', out.n1, 1),
+        eq('「今天」标记必须真的写下来（跨冷启动生效的前提）', out.mark, out.today),
+        eq('同日第二次查 → 不再请求', out.n2, 1),
+        eq('harness 是 http 页面：autoUpd 必须被协议门挡住、零请求', out.n3, 1),
+        eq('前提确认：本页协议不是 file:', out.proto, 'http:'),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
