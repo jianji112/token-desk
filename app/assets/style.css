@@ -433,6 +433,11 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .kv .v{font-weight:600}
 a{color:var(--acc-2)}
 
-/* 底部设置项红点：GitHub 有新版本时亮起（1.1.2） */
-.tab-dot{position:absolute;top:4px;right:calc(50% - 12px);width:6px;height:6px;border-radius:50%;background:#ff4757;display:none;pointer-events:none}
-.tab .tab-dot{display:block}
+/* 底部设置项红点：GitHub 有新版本时亮起（1.1.2）。
+   1.1.5 修正位置：挂在图标容器 .ico-wrap 的右上角（原来相对按钮用 right:calc(50% - 12px)，
+   跑到图标左侧/底部中间去了）。红点必须包在 .ico-wrap 里，绝不能塞进 <svg>（会踹开 svg）。 */
+/* ⚠ 选择器不能用 `.tab .ico-wrap`：底部按钮的 class 是 `on`（当前页签）而不是 `tab`，
+   写成 .tab 会导致 .ico-wrap 没有 position:relative，红点改相对 nav 定位、跑到图标右边 34px 处。 */
+#tabs .ico-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center}
+.tab-dot{position:absolute;top:-1px;right:-5px;width:6px;height:6px;border-radius:50%;
+  background:#ff4757;box-shadow:0 0 0 2px rgba(20,22,26,.9);display:none;pointer-events:none}

@@ -1457,28 +1457,29 @@ const fixtures = [
 
   {
     id: 'F23e',
-    name: '更新通道 fallback：fetch 失败时原生桥接管（双通道 + 多源兜底）',
-    // 现场复现：主人手机网络下浏览器内核 fetch 访问 api.github.com 失败（跨境链路 4s 超时太短），
-    // 只有浏览器通道时直接报「检查失败」。修法：超时 4s→15s + fetch 失败后 fallback 原生桥 + 多镜像源。
-    cfg: (port) => baseCfg(port, { channel: 'native' }),
+    name: '更新检查固定走浏览器内核（不 fallback 原生桥）+ 超时 15s + 多源',
+    // 主人 2026-10-21 定：更新检查以后只走浏览器内核。理由：走系统网络栈/代理，可达性由浏览器内核决定，
+    // 比原生桥（Java HttpURLConnection，不走系统代理）更符合用户预期。
+    // 所以 fetch 失败就是失败，不许偷偷改走原生桥 —— 原生桥可能绕过用户代理，
+    // 在受限网络下反而更慢/更不通，且行为与「浏览器内核直连」设置不一致。
+    cfg: (port) => baseCfg(port, { channel: 'browser' }),
     preSeed: `window.NativeBridge = {
-        appInfo: function () { return JSON.stringify({ version: '1.1.4', sdk: 34, model: 'test' }); },
+        appInfo: function () { return JSON.stringify({ version: '1.1.5', sdk: 34, model: 'test' }); },
         http: function (id, method, url) {
           var u = String(url);
-          if (u.indexOf('api.github.com') < 0) {            // 其它请求（日志扫描等）回空页，不计数
+          // 只关心「更新检查」这条链：业务请求（127.0.0.1 的日志/token/status）走哪条通道是 channel 配置的事，
+          // 与本用例无关，回空页即可，绝不计数。
+          if (u.indexOf('api.github.com') < 0 && u.indexOf('example.invalid') < 0) {
             setTimeout(function () {
               window.__nativeHttp(id, JSON.stringify({ status: 200, ms: 1, via: 'native', body: JSON.stringify({ items: [], total: 0 }) }));
             }, 2);
             return;
           }
-          window.__NATIVE_CALLS = (window.__NATIVE_CALLS || 0) + 1;   // 只数更新检查这一条
+          window.__NATIVE_CALLS = (window.__NATIVE_CALLS || 0) + 1;
+          window.__NATIVE_URLS = (window.__NATIVE_URLS || []).concat([u.slice(0, 70)]);
           setTimeout(function () {
-            window.__nativeHttp(id, JSON.stringify({
-              status: 200, ms: 12, via: 'native',
-              body: JSON.stringify({ tag_name: 'v1.1.9', html_url: 'https://example.invalid/r', body: 'x',
-                                     assets: [{ name: 'TokenDesk-1.1.9.apk', browser_download_url: 'https://example.invalid/a.apk' }] })
-            }));
-          }, 5);
+            window.__nativeHttp(id, JSON.stringify({ status: 200, ms: 1, via: 'native', body: JSON.stringify({ items: [], total: 0 }) }));
+          }, 2);
         }
       };
       (function () {
@@ -1487,24 +1488,31 @@ const fixtures = [
         window.fetch = function (u, o) {
           var s = String(u);
           if (s.indexOf('example.invalid') < 0 && s.indexOf('api.github.com') < 0) return real.call(window, u, o);
-          window.__FETCH_TRIED++;                       // 浏览器内核通道：一律失败（模拟被墙/超时）
-          return Promise.reject(new Error('net::ERR_CONNECTION_TIMED_OUT'));
+          window.__FETCH_TRIED++;
+          if (s.indexOf('api.github.com') >= 0) {
+            return Promise.reject(new Error('net::ERR_CONNECTION_TIMED_OUT'));   // 直连源失败
+          }
+          return Promise.resolve({ ok: true, status: 200, json: function () {    // 镜像源成功
+            return Promise.resolve({ tag_name: 'v1.1.9', html_url: 'https://example.invalid/r', body: 'x',
+                                     assets: [{ name: 'TokenDesk-1.1.9.apk', browser_download_url: 'https://example.invalid/a.apk' }] });
+          } });
         };
       })();`,
     setup() { state.dynamic = () => ({ items: [], total: 0 }); },
     run: `(async () => {
-      var URLS = ['https://api.github.com/repos/x/y/releases/latest'];
-      var r = await __app.checkUpdate({ force: true, cur: '1.1.4', urls: URLS });
+      var URLS = ['https://api.github.com/repos/x/y/releases/latest', 'https://example.invalid/releases/latest'];
+      var r = await __app.checkUpdate({ force: true, cur: '1.1.5', urls: URLS });
       return { state: r.state, tag: r.tag, apkUrl: r.apkUrl,
-               fetchTried: window.__FETCH_TRIED, nativeCalls: window.__NATIVE_CALLS || 0 };
+               fetchTried: window.__FETCH_TRIED, nativeCalls: window.__NATIVE_CALLS || 0,
+               nativeUrls: window.__NATIVE_URLS || [] };
     })()`,
     check(out) {
       return [
-        eq('fetch 通道必须先试（不能直接跳过浏览器通道）', out.fetchTried, 1),
-        eq('fetch 失败后原生桥必须接管', out.nativeCalls, 1),
-        eq('双通道兜底后必须拿到结论（不许报检查失败）', out.state, 'new'),
-        eq('版本号从原生桥返回体解析出来', out.tag, '1.1.9'),
-        eq('APK 附件直链必须解析出来（供下载并安装）', out.apkUrl, 'https://example.invalid/a.apk'),
+        eq('直连源失败后必须试镜像源（多源兜底）', out.fetchTried, 2),
+        eq('更新检查全程不许碰原生桥（固定只走浏览器内核）', out.nativeCalls, 0),
+        eq('镜像源兜底后必须拿到结论', out.state, 'new'),
+        eq('版本号解析正确', out.tag, 'v1.1.9'.replace('v', '')),
+        eq('APK 附件直链解析正确', out.apkUrl, 'https://example.invalid/a.apk'),
       ];
     },
   },
@@ -2385,7 +2393,47 @@ const fixtures = [
         truthy('相邻刻度不得同一天', out.axis.every((t, i) => i === 0 || t !== out.axis[i - 1])),
         eq('首尾不重复', out.axis[0] !== out.axis[3], true),
         eq('本用例不该有斜纹', out.hatchW, 0),
-        truthy('曲线仍在（刻度不许影响画线）', out.segs > 20),
+        truthy('曲线不许影响画线', out.segs > 20),
+      ];
+    },
+  },
+
+  {
+    id: 'F40',
+    name: '更新红点必须贴在设置图标右上角（不是底部中间）',
+    // 现场复现：原 CSS 用 `right:calc(50% - 12px)` 相对按钮定位，红点跑到图标左侧/底部中间。
+    // 而且 `.tab .ico-wrap` 选择器根本匹配不上 —— 底部按钮的 class 是 `on`（当前页签）、不是 `tab`，
+    // 于是 .ico-wrap 没有 position:relative，红点改相对 nav 定位、偏出 34px。
+    cfg: (port) => baseCfg(port),
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(() => {
+      var dot = document.getElementById('upd-dot');
+      if (!dot) return { missing: true };
+      dot.style.display = 'block';    // 默认 display:none（等 updPaint 判定），量尺寸前先亮出来
+      var wrap = dot.parentNode;
+      var ico = wrap.querySelector('svg');
+      var cs = getComputedStyle(wrap);
+      var d = dot.getBoundingClientRect(), i = ico.getBoundingClientRect();
+      return {
+        missing: false,
+        wrapClass: wrap.className,
+        wrapPos: cs.position,
+        dotW: Math.round(d.width), dotH: Math.round(d.height),
+        // 红点应该跨在图标右上角：水平方向落在图标右边缘附近、垂直方向靠顶部
+        dxRight: Math.round(d.left - i.right),   // ≈ -1 ~ -4（压在右上角外侧）
+        dyTop: Math.round(d.top - i.top),        // ≈ -1 ~ -3（略高于图标顶部）
+        insideIcon: d.left > i.left + i.width / 2 && d.top > i.top + i.height / 2,
+      };
+    })()`,
+    check(out) {
+      return [
+        truthy('红点元素必须存在', !out.missing),
+        eq('红点必须包在 .ico-wrap 里（相对图标定位）', out.wrapClass, 'ico-wrap'),
+        eq('.ico-wrap 必须有 position:relative（否则相对 nav 定位会偏出）', out.wrapPos, 'relative'),
+        eq('红点尺寸 6x6', [out.dotW, out.dotH].join('x'), '6x6'),
+        truthy('红点必须跨在图标右边缘（偏离不超过 6px）', Math.abs(out.dxRight) <= 6),
+        truthy('红点必须在图标顶部附近（±4px）', Math.abs(out.dyTop) <= 4),
+        eq('红点不许压在图标内部', out.insideIcon, false),
       ];
     },
   },

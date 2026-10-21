@@ -3042,18 +3042,8 @@
       var timer = setTimeout(function () { done = true; reject(new Error('timeout')); }, UPD_TIMEOUT_MS);
       function fail(e) { if (done) return; done = true; clearTimeout(timer); reject(e || new Error('fail')); }
       function ok(j) { if (done) return; done = true; clearTimeout(timer); resolve(j); }
-      // 双通道：先浏览器内核 fetch，失败再走原生桥（Java HttpURLConnection）。
-      // 两条网络栈的可达性不一定一致：WebView 的 fetch 被墙/超时，原生桥往往还能通。
-      function viaNative() {
-        if (!window.NativeBridge || typeof window.NativeBridge.http !== 'function') {
-          return fail(new Error('浏览器内核与原生桥均不可用'));
-        }
-        nativeHttp('GET', url, { Accept: 'application/vnd.github+json' }, undefined, UPD_TIMEOUT_MS, true)
-          .then(function (r) {
-            if (!r || r.status < 200 || r.status >= 300) return fail(new Error('HTTP ' + (r && r.status)));
-            try { ok(JSON.parse(r.body)); } catch (e) { fail(e); }
-          }, function () { fail(new Error('浏览器内核与原生桥均失败')); });
-      }
+      // 只走浏览器内核通道（WebView fetch）：走系统网络栈/代理，可达性由浏览器内核决定。
+      // 主人 2026-10-21 定：更新检查以后固定只走浏览器内核，不再 fallback 原生桥。
       try {
         // 必须就地写 window.fetch(...)：裸 fetch 变量在浏览器里 this 不对会 Illegal invocation，
         // 就近取也让 preSeed 里的 fetch 桩拦得住（不被闭包提前固定成真 fetch）
@@ -3062,8 +3052,8 @@
             if (!r || !r.ok) return fail(new Error('HTTP ' + (r && r.status)));
             return r.json();
           })
-          .then(ok, function () { viaNative(); });
-      } catch (e) { viaNative(); }
+          .then(ok, fail);
+      } catch (e) { fail(e); }
     });
   }
 
