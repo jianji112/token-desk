@@ -98,26 +98,67 @@ body{
 .hero-v{font-size:32px;font-weight:800;letter-spacing:-.02em;margin-top:6px;line-height:1.1}
 .hero-v small{font-size:14px;font-weight:600;color:var(--dim);margin-left:4px}
 .hero-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+/* 用量波形：横轴等分、纵轴 sqrt；只画形状，数值靠下面一行说明，避免图上堆标签 */
+.wave{margin-top:12px}
+.w-plot{position:relative;height:46px;touch-action:pan-y;-webkit-user-select:none;user-select:none}
+.w-plot svg{position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible}
+.w-plot .w-line{fill:none;stroke:url(#wstroke);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;
+  vector-effect:non-scaling-stroke}
+/* 辉光：同一路径加粗 + 低透明，比 filter:blur 便宜（WebView 上 blur 会掉帧） */
+.w-plot .w-glow{fill:none;stroke:#4ade80;stroke-opacity:.14;stroke-width:6;stroke-linejoin:round;
+  stroke-linecap:round;vector-effect:non-scaling-stroke}
+.w-plot .w-area{fill:url(#wgrad);stroke:none}
+.w-plot .w-base{stroke:rgba(255,255,255,.07);stroke-width:1;vector-effect:non-scaling-stroke}
+/* 仓里没覆盖到的一段：压一层斜纹，配合文案「仅覆盖 N 小时」。
+   1.1.1 起调淡一档（.045→.028，4/8px→5/11px）：满屏斑马纹太抢眼，而它是「提示」不是主视觉。
+   斜纹是 <svg> 的兄弟节点（在 svg 之前 = 画在曲线下面），绝不能塞进 svg 里（会踹开 svg，见 app.js 注释）。 */
+.w-plot .w-unk{position:absolute;left:0;top:0;bottom:0;border-radius:4px;
+  background:repeating-linear-gradient(135deg,rgba(255,255,255,.028) 0 5px,transparent 5px 11px);
+  pointer-events:none}
+.w-plot .w-dot{position:absolute;right:0;width:5px;height:5px;margin:0 -2.5px -2.5px 0;border-radius:50%;
+  background:#4ade80;box-shadow:0 0 0 3px rgba(74,222,128,.16);pointer-events:none}
+.w-plot .w-cursor{position:absolute;top:-2px;bottom:-2px;width:1px;background:rgba(255,255,255,.45);display:none;
+  pointer-events:none}
+/* 横轴刻度：与 w-cap 同级、在它上面一行；space-between 让首尾贴齐波形左右内缩（1.5%） */
+.w-axis{display:flex;justify-content:space-between;align-items:center;margin-top:4px;padding:0 .4%;
+  font-size:9.5px;letter-spacing:.02em;color:#66788a;font-variant-numeric:tabular-nums;
+  overflow:hidden;white-space:nowrap}
+.w-axis span{flex:0 0 auto}
+.w-cap{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:5px;
+  font-size:10px;letter-spacing:.02em;color:var(--dim-2);font-variant-numeric:tabular-nums}
+.w-cap .w-l,.w-cap .w-r{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.w-cap .w-r{flex:0 0 auto;color:#a6b6c6}
 .mini{background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);border-radius:12px;padding:9px 10px}
 .mini .k{font-size:11.5px;color:var(--dim-2);letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mini .v{font-size:15px;font-weight:700;margin-top:2px}
 .mini .v.cred{color:var(--acc)}
+.mini .v.warn{color:#fcd34d}
 
-.row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.045)}
+.row{display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.045)}
 .row:last-child{border-bottom:none;padding-bottom:0}
 .row:first-child{padding-top:0}
 .row .grow{flex:1 1 auto;min-width:0}
 .row .name{font-weight:650;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row .meta{font-size:12px;color:#93a4b5;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.row .val{font-weight:700;font-size:14px;text-align:right;flex:0 0 auto;align-self:flex-start;padding-top:1px}
-.row .val small{display:block;font-size:10.5px;color:var(--dim-2);font-weight:500;margin-top:1px}
-.eff{font-weight:600;letter-spacing:.01em}
-.row .meta .ttft{margin-left:15px;color:#a6b6c6}
-.eff.e-high{color:#fbbf24}
-.eff.e-max{color:#c084fc}
-.eff.e-medium{color:#38bdf8}
-.eff.e-low{color:#9fb3c8}
-.eff.e-none{color:#5d6b7a}
+.row .val{font-weight:700;font-size:14px;text-align:right;flex:0 1 auto;max-width:48%;align-self:flex-start;padding-top:1px}
+.row .val small{display:block;font-size:10.5px;color:var(--dim-2);font-weight:500;margin-top:2px;
+  font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:14em;margin-left:auto}
+/* 最近请求两行制：第二行 = key·时间（key 可省略）+ 右端琥珀胶囊（账号·积分）；
+   速度与首字时间下沉到 token 数下方的小字。胶囊 flex:0 0 auto ⇒ 永不截断，
+   省略号只会切 key 名，绝不切时间/积分的数字。 */
+.row .mline{display:flex;align-items:center;gap:5px;margin-top:2px;min-width:0}
+.row .mline .mt{flex:1 1 auto;min-width:0;display:flex;align-items:center;font-size:12px;color:#93a4b5}
+.row .mline .mkey{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.row .mline .mtime{flex:0 0 auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.row .mline .msep{flex:0 0 auto;margin:0 3px;opacity:.5}
+.row .val small .ttft{margin-left:3px;color:#a6b6c6}
+/* 积分胶囊：冷灰蓝、去饱和（原来琥珀色太抢眼，一行只该有一个视觉重点：模型名） */
+.row .cr{flex:0 0 auto;color:#93a9bb;font-weight:600;display:inline-flex;align-items:center;gap:3px;
+  padding:0 4px;line-height:15px;border-radius:5px;font-size:10px;max-width:100%;
+  background:rgba(148,163,184,.09);font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.row .cr .cr-n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.row .cr .cr-s,.row .cr .cr-v{flex:0 0 auto}
+.row .cr .cr-v{color:#cfdae5}
 
 .pill{
   display:inline-flex;align-items:center;gap:5px;
@@ -183,6 +224,19 @@ tr.rem-row.open .rem-caret{transform:rotate(90deg);color:var(--warn)}
 .rem-i{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0}
 .rem-n{flex:1 1 auto;min-width:0;font-size:11.5px;color:#c9d6e2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rem-t{flex:0 0 auto;font-size:11px;color:#fcd34d;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.exp-i{display:flex;align-items:center;gap:8px;padding:4px 0;min-width:0}
+.exp-i + .exp-i{border-top:1px solid rgba(255,255,255,.035)}
+.exp-d{flex:0 0 auto;width:4.8em;font-size:11.5px;color:#c9d6e2;font-variant-numeric:tabular-nums}
+.exp-n{flex:1 1 auto;min-width:0;font-size:10.5px;color:var(--dim-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.exp-v{flex:0 0 auto;font-size:11.5px;color:#e6edf3;font-variant-numeric:tabular-nums;font-weight:600}
+.exp-i.urgent .exp-v{color:#fcd34d}
+.exp-rest{font-size:10.5px;color:var(--dim-2);padding-top:5px;letter-spacing:.02em}
+.acc-more-h .hsub{float:right;font-weight:400;color:var(--dim-2);letter-spacing:0;font-size:10px}
+.acc-main .name > .live{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--acc);
+  box-shadow:0 0 0 0 rgba(74,222,128,.7);animation:livePulse 1.6s ease-out infinite}
+@keyframes livePulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.65)}
+  70%{box-shadow:0 0 0 5px rgba(74,222,128,0)}
+  100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
 
 .pvm{display:inline-block;height:.82em;border-radius:.42em;vertical-align:-.06em;
   background:linear-gradient(90deg,#2b3a4a,#3a4c60 55%,#2b3a4a);
@@ -378,3 +432,7 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 .kv .k{color:var(--dim-2)}
 .kv .v{font-weight:600}
 a{color:var(--acc-2)}
+
+/* 底部设置项红点：GitHub 有新版本时亮起（1.1.2） */
+.tab-dot{position:absolute;top:4px;right:calc(50% - 12px);width:6px;height:6px;border-radius:50%;background:#ff4757;display:none;pointer-events:none}
+.tab .tab-dot{display:block}
