@@ -1126,11 +1126,16 @@
   function errBox(msg) {
     var text = esc(msg).replace(/\n/g, '<br>');
     var isPublic = /^https:/i.test(CFG.newapiBase || '');
+    // 壳内「浏览器内核直连失败」＝跨源被浏览器拦下（服务端没回 CORS 头），不是令牌/密码错。
+    // 这类用户不该被留在死路上：给一个一键切回原生请求的按钮。判据只用 !!window.NativeBridge
+    // （与 migrateChannel() 同一个判据），不看 secureAvailable()、也不猜用户填的是内网还是公网。
+    var canNative = !!window.NativeBridge && CFG.channel !== 'native' && /浏览器内核直连失败/.test(String(msg || ''));
     return '<div class="errbox"><b>出错了</b>' + text +
       '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +
       '<button class="btn ghost" style="height:36px;font-size:12px;flex:0 0 auto;padding:0 14px" data-err="retry">重试</button>' +
       '<button class="btn ghost" style="height:36px;font-size:12px;flex:0 0 auto;padding:0 14px" data-err="settings">去设置</button>' +
       (isPublic && presetReady('lan') ? '<button class="btn ok" style="height:36px;font-size:12px;flex:0 0 auto;padding:0 14px" data-err="lan">改用内网地址</button>' : '') +
+      (canNative ? '<button class="btn ok" style="height:36px;font-size:12px;flex:0 0 auto;padding:0 14px" data-err="native">切回原生请求</button>' : '') +
       '</div></div>';
   }
 
@@ -2811,6 +2816,15 @@
       if (!b) return;
       var act = b.getAttribute('data-err');
       if (act === 'settings') { showTab('settings'); return; }
+      if (act === 'native') {
+        // 壳内直连失败的一键退路：只切通道，不换网关 → 面板令牌仍然有效，不许清 S.hubToken
+        CFG.channel = 'native';
+        saveCfg();
+        toast('已切回「原生请求」，正在重试…', 'ok');
+        refreshAll();
+        renderSettings();
+        return;
+      }
       if (act === 'lan') {
         if (presetOk(PRESETS.lan.newapiBase)) CFG.newapiBase = PRESETS.lan.newapiBase;
         if (presetOk(PRESETS.lan.hubBase)) CFG.hubBase = PRESETS.lan.hubBase;

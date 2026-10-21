@@ -1068,6 +1068,55 @@ const fixtures = [
   },
 
   {
+    id: 'F20',
+    name: '错误卡片：壳内「浏览器内核直连失败」必须给「切回原生请求」一键退路',
+    // 壳内 file:// 页面关了万能跨源之后，浏览器内核通道失败的真正原因是服务端没回 CORS 头，
+    // 文案里已经说清楚了，但用户没有出口：这里给一键切回原生请求，且只切通道、不许清面板令牌。
+    // 网页版（无桥）没有原生请求可切，按钮必须不出现。
+    cfg: (port) => baseCfg(port, { channel: 'browser' }),
+    preSeed: `window.NativeBridge = {};`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      var MSG = '浏览器内核直连失败：Failed to fetch（该通道要求服务端返回 CORS 头）';
+      function render(msg, ch) {
+        __app.cfg().channel = ch;
+        __app.state.errors.overview = msg;
+        __app.showTab('overview');
+        var b = document.querySelector('[data-err="native"]');
+        return { has: !!b, text: b ? b.textContent : null,
+                 retry: !!document.querySelector('[data-err="retry"]'),
+                 settings: !!document.querySelector('[data-err="settings"]') };
+      }
+      var r1 = render(MSG, 'browser');                       // 壳内 + 直连失败 → 必须有
+      var btn = document.querySelector('[data-err="native"]');
+      __app.state.hubToken = 'keep-me';
+      if (btn) btn.click();                                  // 点它
+      var ch1 = __app.cfg().channel, hub1 = __app.state.hubToken;
+      var ls1 = {};
+      try { ls1 = JSON.parse(localStorage.getItem('tokendesk.cfg.v1') || '{}'); } catch (e) {}
+      var r2 = render(MSG, 'native');                        // 已是原生 → 不该再出现
+      var r3 = render('普通错误：令牌无效', 'browser');       // 壳内但非直连失败 → 不该出现
+      delete window.NativeBridge;                            // 网页版：没有原生请求可切
+      var r4 = render(MSG, 'browser');
+      return { r1: r1, ch1: ch1, hub1: hub1, lsCh: ls1.channel || null,
+               r2: r2, r3: r3, r4: r4 };
+    })()`,
+    check(out) {
+      return [
+        eq('壳内 + 直连失败 → 必须出现退回按钮', out.r1.has, true),
+        eq('按钮文案', out.r1.text, '切回原生请求'),
+        eq('原有「重试」「去设置」不得被挤掉', [out.r1.retry, out.r1.settings], [true, true]),
+        eq('点一下切到原生请求', out.ch1, 'native'),
+        eq('通道切换必须落盘', out.lsCh, 'native'),
+        eq('只切通道、网关没变 → 面板令牌不得被清', out.hub1, 'keep-me'),
+        eq('已是原生请求时不再显示该按钮（没有可切的东西）', out.r2.has, false),
+        eq('错误文案不含「直连失败」时不得出现（不冒充退路）', out.r3.has, false),
+        eq('网页版（无桥）不显示该按钮', out.r4.has, false),
+      ];
+    },
+  },
+
+  {
     id: 'F7c-js',
     name: 'bridge 永不回调 → JS 必须自己超时、reject 并清干净 pending',
     cfg: (port) => baseCfg(port, { channel: 'native' }),
