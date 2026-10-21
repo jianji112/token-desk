@@ -3011,8 +3011,13 @@
 
   // 只贴这一小块 DOM，不整页重渲染：否则检查完会把用户正在填的输入和滚动位置冲掉
   function updPaint() {
+    // ⚠ 红点属于全局导航（底部 tab），必须在「不在设置页就 return」**之前**处理：
+    // 启动自动检查 / 概览页手动检查时，设置页根本没渲染（#upd-line 不存在），
+    // 原来的位置永远执行不到 → 检测到新版本也不亮红点。
+    var updDot = document.getElementById('upd-dot');
+    if (updDot) updDot.style.display = hasUpd() ? 'block' : 'none';
     var line = $('#upd-line');
-    if (!line) return;   // 不在设置页
+    if (!line) return;   // 不在设置页（下面都是设置页内的字段）
     line.textContent = updLine();
     // 「今天 09:29 查过」单独一行：结论与时间分开，结论行文案不动（既有断言只看结论行）
     var at = $('#upd-at');
@@ -3021,9 +3026,6 @@
     if (btn) { btn.disabled = UPD.state === 'checking'; btn.textContent = UPD.state === 'checking' ? '检查中…' : '检查更新'; }
     var cp = $('#f-updcopy');
     if (cp) cp.style.display = (UPD.state === 'new' && UPD.url) ? '' : 'none';
-    // 设置 tab 红点：有新版本时亮起
-    var updDot = document.getElementById('upd-dot');
-    if (updDot) updDot.style.display = hasUpd() ? 'block' : 'none';
     // 应用内更新：能下载就露「下载并安装」，网页版只能复制地址
     var dl = $('#f-upddl');
     if (dl) dl.style.display = (UPD.state === 'new' && UPD.apkUrl && canInstallApk()) ? '' : 'none';

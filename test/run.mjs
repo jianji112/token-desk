@@ -2437,6 +2437,43 @@ const fixtures = [
       ];
     },
   },
+
+  {
+    id: 'F41',
+    name: '不在设置页时，检测到新版本也必须亮红点（启动自动检查就属于这种）',
+    // 真实故障：updPaint() 开头是 `if (!line) return;`（不在设置页直接返回），
+    // 而红点控制写在它之后 → 概览页/启动自动检查时永远执行不到，
+    // 表现就是「明明检测到新版本，设置图标却不亮红点」。
+    cfg: (port) => baseCfg(port, { range: '24h' }),
+    preSeed: `(function () {
+        var real = window.fetch;
+        window.fetch = function (u, o) {
+          var s = String(u);
+          if (s.indexOf('api.github.com') < 0 && s.indexOf('example.invalid') < 0) return real.call(window, u, o);
+          return Promise.resolve({ ok: true, status: 200, json: function () {
+            return Promise.resolve({ tag_name: 'v9.9.9', html_url: 'https://example.invalid/r', body: 'x', assets: [] });
+          } });
+        };
+      })();`,
+    setup() { state.dynamic = () => ({ items: [], total: 0 }); },
+    run: `(async () => {
+      __app.showTab('overview');                       // 停在概览页：设置页根本没渲染
+      await __app.checkUpdate({ force: true, cur: '1.1.6', urls: ['https://api.github.com/x'] });
+      var dot = document.getElementById('upd-dot');
+      return {
+        state: __app.upd().state,
+        onSettings: !!document.getElementById('upd-line'),   // 必须为 false（不在设置页）
+        display: dot ? dot.style.display : null,
+      };
+    })()`,
+    check(out) {
+      return [
+        eq('必须检测到新版本', out.state, 'new'),
+        eq('前提确认：当前不在设置页（#upd-line 不存在）', out.onSettings, false),
+        eq('不在设置页也必须点亮红点', out.display, 'block'),
+      ];
+    },
+  },
 ];
 
 /** 明确测不了的：需要改主代码加钩子，或需要 Java/bridge */
