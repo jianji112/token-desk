@@ -40,8 +40,10 @@ public class MainActivity extends Activity {
     final ExecutorService pool = Executors.newFixedThreadPool(4);
     // 在途请求登记表：提交/同 id 去重/取消。不依赖 Android API，可被 JVM 单测直接覆盖
     final HttpJobRegistry jobs = new HttpJobRegistry(pool, this::onHttpResult);
-    // 凭证安全存储：Keystore 主密钥 + SharedPreferences 密文（P0-3 Wave A，纯新增）
-    final SecureStore secure = new SecureStore(this);
+    // 凭证安全存储：Keystore 主密钥 + SharedPreferences 密文（P0-3 Wave A，纯新增）。
+    // ⚠️ 不能在字段初始化期构造：字段初始化跑在 Activity 构造里，早于 attachBaseContext，
+    // this.getApplicationContext() 必抛 NPE → 启动即崩（真机实测）。改为 onCreate 里赋值。
+    SecureStore secure;
 
     // ---- 凭证安全存储对外接口（Bridge 只做转发，逻辑全在 SecureStore） ----
     /** Keystore 是否可用；返回 false 时 JS 必须回退 localStorage 并在设置页标红。 */
@@ -78,6 +80,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // SecureStore 只能在这里（attachBaseContext 之后）构造，见字段声明处注释
+        secure = new SecureStore(this);
         getWindow().setStatusBarColor(Color.parseColor("#0b0f14"));
         getWindow().setNavigationBarColor(Color.parseColor("#0b0f14"));
 
