@@ -56,6 +56,28 @@ for f in "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner" "$PLATFORM"; do
   [ -e "$f" ] || { echo "缺少构建组件: $f" >&2; exit 1; }
 done
 
+# ── 签名密钥守卫 ────────────────────────────────────────────────────────────
+# 自动生成新密钥 = 换签名 = 设备上已装的包覆盖安装必然失败（INSTALL_FAILED_UPDATE_INCOMPATIBLE），
+# 只能卸载重装、应用数据全丢。所以「生成新密钥」必须显式 TD_ALLOW_NEW_KEY=1 才放行。
+# 本脚本刻意不回落到 ../private（private/build.sh:2 要求 public/ 不知道私有布局）。
+KS_EXPLICIT="${TD_KEYSTORE:-}"
+KS="${KS_EXPLICIT:-$ROOT/.signing/tokendesk.jks}"
+ALLOW_NEW_KEY="${TD_ALLOW_NEW_KEY:-0}"
+if [ ! -f "$KS" ]; then
+  if [ "$ALLOW_NEW_KEY" != "1" ]; then
+    if [ -z "$KS_EXPLICIT" ]; then
+      echo "错误：签名密钥不存在：$KS（未显式给 TD_KEYSTORE，用的是默认位置）" >&2
+    else
+      echo "错误：签名密钥不存在：$KS（TD_KEYSTORE 指向的文件缺失）" >&2
+    fi
+    echo "  生成新密钥会换签名：设备上已装的包只能卸载重装，应用数据全部丢失。" >&2
+    echo "  正常私钥在 private/keystore，应从 private/build.sh 出包（它自己指定 TD_KEYSTORE）。" >&2
+    echo "  确实要用新签名（例如从未发布过的自用包）：显式加 TD_ALLOW_NEW_KEY=1 再跑。" >&2
+    exit 1
+  fi
+  echo "⚠️ TD_ALLOW_NEW_KEY=1：在 $KS 生成新签名密钥（与已发布签名不同，旧包不能覆盖升级）"
+fi
+
 KS_PASS="${TD_KS_PASS:-}"
 if [ -z "$KS_PASS" ] && [ -f "$ENVFILE" ]; then
   KS_PASS="$( { grep -E '^TD_KS_PASS=' "$ENVFILE" | tail -1 | cut -d= -f2-; } || true )"
@@ -68,7 +90,6 @@ if [ -z "$KS_PASS" ]; then
   echo "已生成签名口令并写入 $ENVFILE (TD_KS_PASS)"
 fi
 
-KS="${TD_KEYSTORE:-$ROOT/.signing/tokendesk.jks}"
 if [ ! -f "$KS" ]; then
   mkdir -p "$(dirname "$KS")"
   keytool -genkeypair -keystore "$KS" -alias tokendesk -keyalg RSA -keysize 2048 \
@@ -76,6 +97,16 @@ if [ ! -f "$KS" ]; then
     -dname "CN=TokenDesk, OU=opensource, O=TokenDesk, C=CN" >/dev/null 2>&1
   chmod 600 "$KS"
   echo "已生成签名证书 $KS"
+fi
+
+# 出包记录里可直接核：实际使用的 keystore 路径 + 证书指纹（与设备已装包比对用）
+echo "🔑 签名 keystore：$KS"
+KS_FP="$( { keytool -list -v -keystore "$KS" -alias tokendesk -storepass "$KS_PASS" 2>/dev/null || true; } \
+  | { grep -m1 'SHA256:' || true; } | sed 's/.*SHA256: *//' )"
+if [ -n "$KS_FP" ]; then
+  echo "🔑 证书 SHA-256：$KS_FP"
+else
+  echo "🔑 证书 SHA-256：（读取失败，口令与 keystore 不匹配？签名步骤会报错）"
 fi
 
 rm -rf "$OUT"
